@@ -5,60 +5,54 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="theme-color" content="#008080">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>EcoInvite</title>
 
-<!-- ═══════════════════════════════════════════════════════════
-     🔥 FIREBASE CONFIG — REPLACE WITH YOUR OWN VALUES
-     1. Go to https://console.firebase.google.com
-     2. Create a project → Add a web app
-     3. Copy your firebaseConfig object here
-     4. Enable Firestore Database (test mode to start)
-     5. Enable Authentication → Anonymous sign-in
-     ══════════════════════════════════════════════════════════ -->
-<script>
-  const firebaseConfig = {
-    apiKey: "AIzaSyDXdh-UeUhSNZRgMhY1BzwWWNUko0lWV_A",
-    authDomain: "ecoinvite-ee332.firebaseapp.com",
-    projectId: "ecoinvite-ee332",
-    storageBucket: "ecoinvite-ee332.firebasestorage.app",
-    messagingSenderId: "263863833402",
-    appId: "1:263863833402:web:4339d663cf47c974cbb603"
-  };
-</script>
-
-<!-- Firebase v10 SDK (ESM via CDN) -->
 <script type="module">
-import { initializeApp }                             from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+// ═══════════════════════════════════════════════════════════
+//  🔥 PASTE YOUR FIREBASE CONFIG VALUES HERE
+//  Firebase Console → Project Settings → Your Apps → Web App
+// ═══════════════════════════════════════════════════════════
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   getFirestore, doc, getDoc, setDoc, updateDoc,
   collection, addDoc, onSnapshot, query, where,
-  serverTimestamp, arrayUnion, deleteDoc
+  serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
+const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSyDXdh-UeUhSNZRgMhY1BzwWWNUko0lWV_A",
+  authDomain:        "ecoinvite-ee332.firebaseapp.com",
+  projectId:         "ecoinvite-ee332",
+  storageBucket:     "ecoinvite-ee332.firebasestorage.app",
+  messagingSenderId: "263863833402",
+  appId:             "1:263863833402:web:4339d663cf47c974cbb603"
+};
+
 // ─────────────────────────────────────────
-//  INIT
+//  INIT FIREBASE
 // ─────────────────────────────────────────
-const app  = initializeApp(window.firebaseConfig);
+const app  = initializeApp(FIREBASE_CONFIG);
 const auth = getAuth(app);
 const db   = getFirestore(app);
 
 // ─────────────────────────────────────────
-//  LOCAL STATE  (in-memory runtime only)
+//  LOCAL STATE
 // ─────────────────────────────────────────
 const state = {
-  uid:            null,   // Firebase anonymous uid
-  myName:         '',
-  ecoCode:        '',
-  ecoName:        '',
-  members:        [],     // [{uid, name}]
-  receivedInvites:[],
-  sentInvites:    [],
-  activeInvite:   null,
+  uid:               null,
+  myName:            '',
+  ecoCode:           '',
+  ecoName:           '',
+  members:           [],
+  receivedInvites:   [],
+  sentInvites:       [],
+  activeInvite:      null,
   selectedRecipient: null,
-  unsubscribeInvites: null,
-  unsubscribeMembers: null,
+  unsubscribeInvites:  null,
+  unsubscribeMembers:  null,
 };
 
 // ─────────────────────────────────────────
@@ -76,45 +70,41 @@ const fillEl   = document.getElementById('boot-fill');
 const statusEl = document.getElementById('boot-status');
 
 function bootStep(msg) {
-  statusEl.textContent = msg;
-  fillEl.style.width   = ((bootIdx + 1) / bootMessages.length * 100) + '%';
+  if (statusEl) statusEl.textContent = msg;
+  if (fillEl)   fillEl.style.width   = ((bootIdx + 1) / bootMessages.length * 100) + '%';
   bootIdx++;
 }
 
-// Start boot animation, then wait for Firebase auth
 (function runBoot() {
   const interval = setInterval(() => {
     if (bootIdx < bootMessages.length - 1) {
       bootStep(bootMessages[bootIdx]);
     } else {
       clearInterval(interval);
-      // Auth listener will call bootStep('Ready.') and advance
     }
   }, 500);
 })();
 
 // ─────────────────────────────────────────
-//  FIREBASE AUTH → SESSION RESTORE
+//  AUTH — sign in anonymously, restore session
 // ─────────────────────────────────────────
 onAuthStateChanged(auth, async (user) => {
   if (!user) {
-    // Sign in anonymously — creates a persistent uid in localStorage by Firebase SDK
     await signInAnonymously(auth).catch(err => {
-      bootStep('Auth error: ' + err.message);
+      if (statusEl) statusEl.textContent = 'Auth error: ' + err.message;
     });
     return;
   }
 
   state.uid = user.uid;
   bootStep('Ready.');
-  fillEl.style.width = '100%';
+  if (fillEl) fillEl.style.width = '100%';
 
-  // Check if user has a saved profile in Firestore
   const userDoc = await getDoc(doc(db, 'users', state.uid));
 
   setTimeout(() => {
     if (userDoc.exists()) {
-      const data = userDoc.data();
+      const data    = userDoc.data();
       state.myName  = data.name;
       state.ecoCode = data.ecoCode || '';
       state.ecoName = data.ecoName || '';
@@ -186,7 +176,6 @@ function showReceiveTab() {
   }
 }
 
-// Expose globally for onclick handlers
 window.showScreen     = showScreen;
 window.showMainTab    = showMainTab;
 window.showReceiveTab = showReceiveTab;
@@ -222,12 +211,12 @@ function showPopup(opts) {
   const nameInputWrap = document.getElementById('popup-name-input-wrap');
   const loadingWrap   = document.getElementById('popup-loading');
 
-  codeWrap.style.display      = opts.showCode        ? '' : 'none';
-  inputWrap.style.display     = opts.showInput       ? '' : 'none';
-  nameInputWrap.style.display = opts.showNameInputs  ? '' : 'none';
-  loadingWrap.style.display   = opts.showLoading     ? '' : 'none';
+  codeWrap.style.display      = opts.showCode       ? '' : 'none';
+  inputWrap.style.display     = opts.showInput      ? '' : 'none';
+  nameInputWrap.style.display = opts.showNameInputs ? '' : 'none';
+  loadingWrap.style.display   = opts.showLoading    ? '' : 'none';
 
-  if (opts.showCode)  document.getElementById('popup-code').textContent = opts.codeVal || '';
+  if (opts.showCode) document.getElementById('popup-code').textContent = opts.codeVal || '';
   if (opts.showInput) {
     document.getElementById('popup-input-label').textContent = opts.inputLabel       || 'Enter code:';
     document.getElementById('popup-input').value             = '';
@@ -235,20 +224,19 @@ function showPopup(opts) {
     document.getElementById('popup-input').maxLength         = opts.inputMaxLen      || 8;
   }
   if (opts.showNameInputs) {
-    document.getElementById('popup-name-input').value     = '';
-    document.getElementById('popup-eco-name-input').value = '';
-    document.getElementById('popup-eco-name-label').textContent = opts.secondLabel || 'Ecosystem name:';
+    document.getElementById('popup-name-input').value           = '';
+    document.getElementById('popup-eco-name-input').value       = '';
+    document.getElementById('popup-eco-name-label').textContent = opts.secondLabel       || 'Ecosystem name:';
     document.getElementById('popup-eco-name-input').placeholder = opts.secondPlaceholder || 'e.g. The Crew';
   }
 
   const btnsEl = document.getElementById('popup-btns');
   btnsEl.innerHTML = '';
-  (opts.btns || [{label:'OK', cb: null}]).forEach(b => {
-    const el      = document.createElement('button');
-    el.className  = 'btn';
+  (opts.btns || [{label:'OK', cb:null}]).forEach(b => {
+    const el       = document.createElement('button');
+    el.className   = 'btn';
     el.textContent = b.label;
-    el.id         = b.id || '';
-    el.onclick    = () => { if (b.cb) b.cb(); else closePopup(); };
+    el.onclick     = () => { if (b.cb) b.cb(); else closePopup(); };
     btnsEl.appendChild(el);
   });
 
@@ -296,30 +284,17 @@ async function confirmCreateEco() {
   }
 
   setPopupLoading(true, 'Creating your ecosystem...');
-
   const ecoCode = genCode(6);
 
   try {
-    // Write ecosystem doc
     await setDoc(doc(db, 'ecosystems', ecoCode), {
-      name:      ecoName,
-      createdBy: state.uid,
-      createdAt: serverTimestamp(),
+      name: ecoName, createdBy: state.uid, createdAt: serverTimestamp(),
     });
-
-    // Add self as member
     await setDoc(doc(db, 'ecosystems', ecoCode, 'members', state.uid), {
-      name:     name,
-      uid:      state.uid,
-      joinedAt: serverTimestamp(),
+      name: name, uid: state.uid, joinedAt: serverTimestamp(),
     });
-
-    // Save user profile
     await setDoc(doc(db, 'users', state.uid), {
-      name:     name,
-      ecoCode:  ecoCode,
-      ecoName:  ecoName,
-      uid:      state.uid,
+      name: name, ecoCode: ecoCode, ecoName: ecoName, uid: state.uid,
     });
 
     state.myName  = name;
@@ -327,19 +302,19 @@ async function confirmCreateEco() {
     state.ecoName = ecoName;
 
     setPopupLoading(false);
-    document.getElementById('popup-msg').textContent = `"${ecoName}" is live, ${name}! Share your code:`;
-    document.getElementById('popup-code-wrap').style.display = '';
-    document.getElementById('popup-code').textContent        = ecoCode;
+    document.getElementById('popup-msg').textContent               = `"${ecoName}" is live, ${name}! Share your code:`;
+    document.getElementById('popup-code-wrap').style.display       = '';
+    document.getElementById('popup-code').textContent              = ecoCode;
     document.getElementById('popup-name-input-wrap').style.display = 'none';
-    document.getElementById('popup-btns').style.display      = '';
-    document.getElementById('popup-btns').innerHTML          = '';
+    document.getElementById('popup-btns').style.display            = '';
+    document.getElementById('popup-btns').innerHTML                = '';
     const btn      = document.createElement('button');
     btn.className  = 'btn';
     btn.textContent = "LET'S GO!";
     btn.onclick    = () => { closePopup(); enterApp(); };
     document.getElementById('popup-btns').appendChild(btn);
 
-  } catch (err) {
+  } catch(err) {
     setPopupLoading(false);
     document.getElementById('popup-msg').textContent = '❌ Error: ' + err.message;
   }
@@ -356,7 +331,7 @@ function showJoinEco() {
     secondLabel: "Friend's ecosystem code:",
     secondPlaceholder: 'e.g. XK7P2M',
     btns:[
-      { label:'JOIN', cb: confirmJoinEco },
+      { label:'JOIN',   cb: confirmJoinEco },
       { label:'Cancel', cb: closePopup },
     ]
   });
@@ -388,19 +363,11 @@ async function confirmJoinEco() {
 
     const ecoData = ecoSnap.data();
 
-    // Add self as member
     await setDoc(doc(db, 'ecosystems', code, 'members', state.uid), {
-      name:     name,
-      uid:      state.uid,
-      joinedAt: serverTimestamp(),
+      name: name, uid: state.uid, joinedAt: serverTimestamp(),
     });
-
-    // Save user profile
     await setDoc(doc(db, 'users', state.uid), {
-      name:    name,
-      ecoCode: code,
-      ecoName: ecoData.name,
-      uid:     state.uid,
+      name: name, ecoCode: code, ecoName: ecoData.name, uid: state.uid,
     });
 
     state.myName  = name;
@@ -408,13 +375,13 @@ async function confirmJoinEco() {
     state.ecoName = ecoData.name;
 
     setPopupLoading(false);
-    document.getElementById('popup-msg').textContent  = `Welcome, ${name}! You joined "${ecoData.name}"!`;
+    document.getElementById('popup-msg').textContent               = `Welcome, ${name}! You joined "${ecoData.name}"!`;
     document.getElementById('popup-name-input-wrap').style.display = 'none';
-    document.getElementById('popup-btns').innerHTML   = '';
-    const btn     = document.createElement('button');
-    btn.className = 'btn';
+    document.getElementById('popup-btns').innerHTML                = '';
+    const btn      = document.createElement('button');
+    btn.className  = 'btn';
     btn.textContent = "LET'S GO!";
-    btn.onclick   = () => { closePopup(); enterApp(); };
+    btn.onclick    = () => { closePopup(); enterApp(); };
     document.getElementById('popup-btns').appendChild(btn);
 
   } catch(err) {
@@ -424,55 +391,37 @@ async function confirmJoinEco() {
 }
 
 // ─────────────────────────────────────────
-//  ENTER APP — wire up real-time listeners
+//  ENTER APP
 // ─────────────────────────────────────────
 function enterApp() {
   document.getElementById('main-taskbar').style.display = 'flex';
   showScreen('screen-home');
   document.getElementById('tab-home').classList.add('active');
 
-  // Real-time member list
   if (state.unsubscribeMembers) state.unsubscribeMembers();
   state.unsubscribeMembers = onSnapshot(
     collection(db, 'ecosystems', state.ecoCode, 'members'),
     (snap) => {
-      state.members = snap.docs
-        .map(d => d.data())
-        .filter(m => m.uid !== state.uid);
+      state.members = snap.docs.map(d => d.data()).filter(m => m.uid !== state.uid);
       refreshHomeScreen();
     }
   );
 
-  // Real-time invite listener — invites sent TO me
   if (state.unsubscribeInvites) state.unsubscribeInvites();
   state.unsubscribeInvites = onSnapshot(
-    query(
-      collection(db, 'invites'),
-      where('toUid', '==', state.uid),
-      where('ecoCode', '==', state.ecoCode)
-    ),
+    query(collection(db, 'invites'), where('toUid','==',state.uid), where('ecoCode','==',state.ecoCode)),
     (snap) => {
-      state.receivedInvites = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      state.receivedInvites = snap.docs.map(d => ({ id:d.id, ...d.data() }));
       refreshHomeScreen();
-
-      // Badge on inbox tab
       const pending = state.receivedInvites.filter(i => i.rsvp === 'pending').length;
       const tabEl   = document.getElementById('tab-receive');
-      if (tabEl) {
-        tabEl.querySelector('.tab-label').textContent = pending > 0 ? `INBOX (${pending})` : 'INBOX';
-      }
+      if (tabEl) tabEl.querySelector('.tab-label').textContent = pending > 0 ? `INBOX(${pending})` : 'INBOX';
     }
   );
 
-  // Also fetch sent invites once (not realtime — just for calendar)
   onSnapshot(
-    query(
-      collection(db, 'invites'),
-      where('fromUid', '==', state.uid)
-    ),
-    (snap) => {
-      state.sentInvites = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    }
+    query(collection(db, 'invites'), where('fromUid','==',state.uid)),
+    (snap) => { state.sentInvites = snap.docs.map(d => ({ id:d.id, ...d.data() })); }
   );
 }
 window.enterApp = enterApp;
@@ -485,18 +434,20 @@ function showInviteCode() {
     titleIcon:'📋', title:'Your Ecosystem Code',
     icon:'🌐',
     msg:`Share this with friends so they can join "${state.ecoName}":`,
-    showCode: true,
-    codeVal:  state.ecoCode,
+    showCode: true, codeVal: state.ecoCode,
     btns:[
-      { label:'📋 Copy', cb: () => { navigator.clipboard?.writeText(state.ecoCode); document.getElementById('popup-msg').textContent = 'Code copied to clipboard!'; }},
-      { label:'Close',   cb: closePopup },
+      { label:'📋 Copy', cb: () => {
+          navigator.clipboard?.writeText(state.ecoCode);
+          document.getElementById('popup-msg').textContent = '✅ Code copied to clipboard!';
+      }},
+      { label:'Close', cb: closePopup },
     ]
   });
 }
 window.showInviteCode = showInviteCode;
 
 // ─────────────────────────────────────────
-//  ADD MEMBER BY CODE
+//  ADD MEMBER
 // ─────────────────────────────────────────
 function showAddMember() {
   showPopup({
@@ -508,25 +459,16 @@ function showAddMember() {
       { label:'Cancel', cb: closePopup },
     ]
   });
-  setTimeout(() => {
-    document.getElementById('popup-input').style.textTransform = 'uppercase';
-  }, 50);
+  setTimeout(() => { document.getElementById('popup-input').style.textTransform = 'uppercase'; }, 50);
 }
 window.showAddMember = showAddMember;
 
 async function confirmAddMember() {
   const code = document.getElementById('popup-input').value.trim().toUpperCase();
-  if (code.length < 4) {
-    document.getElementById('popup-msg').textContent = '⚠ Please enter a valid code (4–6 chars).';
-    return;
-  }
-  if (code === state.ecoCode) {
-    document.getElementById('popup-msg').textContent = "⚠ That's your own code!";
-    return;
-  }
+  if (code.length < 4) { document.getElementById('popup-msg').textContent = '⚠ Please enter a valid code (4–6 chars).'; return; }
+  if (code === state.ecoCode) { document.getElementById('popup-msg').textContent = "⚠ That's your own code!"; return; }
 
   setPopupLoading(true, 'Looking up ecosystem...');
-
   try {
     const ecoSnap = await getDoc(doc(db, 'ecosystems', code));
     if (!ecoSnap.exists()) {
@@ -534,27 +476,16 @@ async function confirmAddMember() {
       document.getElementById('popup-msg').textContent = '❌ Ecosystem not found. Check the code!';
       return;
     }
-
-    // Add self to THEIR ecosystem too (bidirectional)
+    const ecoData = ecoSnap.data();
     await setDoc(doc(db, 'ecosystems', code, 'members', state.uid), {
-      name:     state.myName,
-      uid:      state.uid,
-      joinedAt: serverTimestamp(),
+      name: state.myName, uid: state.uid, joinedAt: serverTimestamp(),
     });
-
-    // Find their members and add them to our ecosystem
-    const theirMembers = await getDoc(collection(db, 'ecosystems', code, 'members'));
-    const ecoData      = ecoSnap.data();
-
     setPopupLoading(false);
-    document.getElementById('popup-msg').textContent = `✅ Connected to "${ecoData.name}"! Their members can now see you.`;
+    document.getElementById('popup-msg').textContent = `✅ Connected to "${ecoData.name}"!`;
     document.getElementById('popup-btns').innerHTML  = '';
-    const btn     = document.createElement('button');
-    btn.className = 'btn';
-    btn.textContent = 'GREAT!';
-    btn.onclick   = closePopup;
+    const btn = document.createElement('button');
+    btn.className = 'btn'; btn.textContent = 'GREAT!'; btn.onclick = closePopup;
     document.getElementById('popup-btns').appendChild(btn);
-
   } catch(err) {
     setPopupLoading(false);
     document.getElementById('popup-msg').textContent = '❌ Error: ' + err.message;
@@ -562,37 +493,34 @@ async function confirmAddMember() {
 }
 
 // ─────────────────────────────────────────
-//  REFRESH HOME SCREEN
+//  HOME SCREEN
 // ─────────────────────────────────────────
 function refreshHomeScreen() {
-  document.getElementById('eco-name-display').textContent  = state.ecoName || 'My Eco';
+  document.getElementById('eco-name-display').textContent      = state.ecoName || 'My Eco';
   document.getElementById('home-eco-code-display').textContent = 'ECO: ' + (state.ecoCode || '------');
-  document.getElementById('home-member-count').textContent = (state.members.length + 1) + ' member' + (state.members.length !== 0 ? 's' : '');
+  document.getElementById('home-member-count').textContent     = (state.members.length + 1) + ' member' + (state.members.length !== 0 ? 's' : '');
 
-  // Members list
   const mlEl = document.getElementById('member-list-home');
-  const all  = [{ name: state.myName + ' (you)', uid: state.uid }].concat(state.members);
-  mlEl.innerHTML = all.map(m =>
+  mlEl.innerHTML = [{ name: state.myName + ' (you)' }].concat(state.members).map(m =>
     `<div class="member-item"><div class="member-dot"></div><span>${m.name}</span></div>`
   ).join('');
 
-  // Incoming invites
   const incomingEl = document.getElementById('incoming-invites-list');
   if (state.receivedInvites.length === 0) {
     incomingEl.innerHTML = `<div style="font-family:var(--font-mono);font-size:12px;color:#888;text-align:center;padding:8px;">No incoming invites yet.</div>`;
   } else {
-    const sorted = [...state.receivedInvites].sort((a,b) => (b.createdAt?.seconds||0) - (a.createdAt?.seconds||0));
-    incomingEl.innerHTML = sorted.map(inv => {
-      const bg  = inv.rsvp === 'yes' ? 'var(--lt-green)' : inv.rsvp === 'no' ? 'var(--lt-red)' : 'var(--lt-yellow)';
-      const dot = inv.rsvp === 'pending' ? '🔴 ' : '';
-      return `<div onclick="openInviteById('${inv.id}')" style="background:${bg};border-bottom:1px solid var(--mid);padding:6px 8px;cursor:pointer;">
-        <div style="font-family:var(--font-main);font-size:18px;">${dot}${inv.title}</div>
-        <div style="font-family:var(--font-mono);font-size:10px;color:#555;">FROM: ${inv.fromName} · ${formatDate(inv.date)} · RSVP: ${(inv.rsvp||'—').toUpperCase()}</div>
-      </div>`;
-    }).join('');
+    incomingEl.innerHTML = [...state.receivedInvites]
+      .sort((a,b) => (b.createdAt?.seconds||0) - (a.createdAt?.seconds||0))
+      .map(inv => {
+        const bg  = inv.rsvp === 'yes' ? 'var(--lt-green)' : inv.rsvp === 'no' ? 'var(--lt-red)' : 'var(--lt-yellow)';
+        const dot = inv.rsvp === 'pending' ? '🔴 ' : '';
+        return `<div onclick="openInviteById('${inv.id}')" style="background:${bg};border-bottom:1px solid var(--mid);padding:6px 8px;cursor:pointer;">
+          <div style="font-family:var(--font-main);font-size:18px;">${dot}${inv.title}</div>
+          <div style="font-family:var(--font-mono);font-size:10px;color:#555;">FROM: ${inv.fromName} · ${formatDate(inv.date)} · RSVP: ${(inv.rsvp||'—').toUpperCase()}</div>
+        </div>`;
+      }).join('');
   }
 
-  // Ticker
   const names = state.members.map(m => m.name).join(' ★ ') || 'Share your code to invite friends';
   document.getElementById('home-ticker').textContent = `★ ${state.ecoName.toUpperCase()} ★ MEMBERS: ${names.toUpperCase()} ★ CODE: ${state.ecoCode} ★ `;
 }
@@ -604,7 +532,7 @@ function openInviteById(id) {
 window.openInviteById = openInviteById;
 
 // ─────────────────────────────────────────
-//  SEND INVITE FLOW
+//  SEND INVITE
 // ─────────────────────────────────────────
 function goToSendInvite() {
   resetSendForm();
@@ -621,7 +549,6 @@ function resetSendForm() {
     document.getElementById(id).value = '';
   });
   sendStep(1);
-
   const cp = document.getElementById('contact-picker');
   if (state.members.length === 0) {
     cp.innerHTML = `<div style="font-family:var(--font-mono);font-size:11px;color:#888;padding:4px;">No members yet. Add members first!</div>`;
@@ -648,27 +575,16 @@ function sendStep(n) {
     document.getElementById('send-step-' + i).style.display = (i === n) ? '' : 'none';
   });
   ['dot1','dot2','dot3'].forEach((id, i) => {
-    const d = document.getElementById(id);
-    d.className = 'step-dot' + (i+1 < n ? ' done' : (i+1 === n ? ' current' : ''));
+    document.getElementById(id).className = 'step-dot' + (i+1 < n ? ' done' : (i+1 === n ? ' current' : ''));
   });
-
   if (n === 2) {
-    if (!state.selectedRecipient) {
-      sendStep(1);
-      setStatus('send-status', '⚠ Please select a recipient first!');
-      return;
-    }
-    setStatus('send-status', 'Fill in your event details.');
+    if (!state.selectedRecipient) { sendStep(1); setStatus('send-status','⚠ Please select a recipient first!'); return; }
+    setStatus('send-status','Fill in your event details.');
   }
-
   if (n === 3) {
     const title = document.getElementById('inv-title').value.trim();
     const date  = document.getElementById('inv-date').value;
-    if (!title || !date) {
-      sendStep(2);
-      setStatus('send-status', '⚠ Title and date are required!');
-      return;
-    }
+    if (!title || !date) { sendStep(2); setStatus('send-status','⚠ Title and date are required!'); return; }
     document.getElementById('prev-title').textContent = title;
     document.getElementById('prev-details').innerHTML = `
       <strong>TO:</strong> ${state.selectedRecipient.name}<br>
@@ -676,7 +592,7 @@ function sendStep(n) {
       <strong>📍</strong> ${document.getElementById('inv-location').value || 'TBD'}<br>
       <strong>📝</strong> ${document.getElementById('inv-details').value || '—'}
     `;
-    setStatus('send-status', 'Looking good! Ready to send.');
+    setStatus('send-status','Looking good! Ready to send.');
   }
 }
 window.sendStep = sendStep;
@@ -684,30 +600,25 @@ window.sendStep = sendStep;
 async function sendInvite() {
   const btn = document.querySelector('#send-step-3 .btn.big');
   if (btn) { btn.textContent = '⏳ Sending...'; btn.disabled = true; }
-
-  const inviteData = {
-    fromUid:  state.uid,
-    fromName: state.myName,
-    toUid:    state.selectedRecipient.uid,
-    toName:   state.selectedRecipient.name,
-    ecoCode:  state.ecoCode,
-    title:    document.getElementById('inv-title').value.trim(),
-    date:     document.getElementById('inv-date').value,
-    time:     document.getElementById('inv-time').value,
-    location: document.getElementById('inv-location').value,
-    details:  document.getElementById('inv-details').value,
-    rsvp:     'pending',
-    createdAt: serverTimestamp(),
-  };
-
   try {
-    await addDoc(collection(db, 'invites'), inviteData);
-    setStatus('send-status', '✔ Invite sent!');
+    await addDoc(collection(db, 'invites'), {
+      fromUid:   state.uid,
+      fromName:  state.myName,
+      toUid:     state.selectedRecipient.uid,
+      toName:    state.selectedRecipient.name,
+      ecoCode:   state.ecoCode,
+      title:     document.getElementById('inv-title').value.trim(),
+      date:      document.getElementById('inv-date').value,
+      time:      document.getElementById('inv-time').value,
+      location:  document.getElementById('inv-location').value,
+      details:   document.getElementById('inv-details').value,
+      rsvp:      'pending',
+      createdAt: serverTimestamp(),
+    });
+    setStatus('send-status','✔ Invite sent!');
     if (btn) { btn.textContent = '📤 SEND!'; btn.disabled = false; }
-
     showPopup({
-      titleIcon:'✅', title:'Invite Sent!',
-      icon:'📤',
+      titleIcon:'✅', title:'Invite Sent!', icon:'📤',
       msg:`Your invite to ${state.selectedRecipient.name} has been sent!`,
       btns:[
         { label:'SEND ANOTHER', cb: () => { closePopup(); resetSendForm(); }},
@@ -716,7 +627,7 @@ async function sendInvite() {
     });
   } catch(err) {
     if (btn) { btn.textContent = '📤 SEND!'; btn.disabled = false; }
-    setStatus('send-status', '❌ Error: ' + err.message);
+    setStatus('send-status','❌ Error: ' + err.message);
   }
 }
 window.sendInvite = sendInvite;
@@ -726,7 +637,6 @@ window.sendInvite = sendInvite;
 // ─────────────────────────────────────────
 function openReceivedInvite(inv) {
   state.activeInvite = inv;
-
   document.getElementById('rec-title').textContent = inv.title;
   document.getElementById('rec-details').innerHTML = `
     <strong>FROM:</strong> ${inv.fromName}<br>
@@ -734,25 +644,20 @@ function openReceivedInvite(inv) {
     <strong>📍</strong> ${inv.location || 'TBD'}<br>
     <strong>📝</strong> ${inv.details || '—'}
   `;
-
   const stamp = document.getElementById('receive-stamp');
   const yBtn  = document.getElementById('rsvp-yes-btn');
   const nBtn  = document.getElementById('rsvp-no-btn');
-
   if (inv.rsvp !== 'pending') {
-    stamp.className   = 'invite-card-stamp' + (inv.rsvp === 'yes' ? ' yes' : '');
+    stamp.className = 'invite-card-stamp' + (inv.rsvp === 'yes' ? ' yes' : '');
     stamp.textContent = inv.rsvp === 'yes' ? 'GOING!' : 'DECLINED';
-    yBtn.className    = 'btn big' + (inv.rsvp === 'yes' ? ' green-sel' : '');
-    nBtn.className    = 'btn big' + (inv.rsvp === 'no'  ? ' red-sel'   : '');
-    setStatus('receive-status', 'RSVP: ' + inv.rsvp.toUpperCase());
+    yBtn.className = 'btn big' + (inv.rsvp === 'yes' ? ' green-sel' : '');
+    nBtn.className = 'btn big' + (inv.rsvp === 'no'  ? ' red-sel'   : '');
+    setStatus('receive-status','RSVP: ' + inv.rsvp.toUpperCase());
   } else {
-    stamp.className   = 'invite-card-stamp pending';
-    stamp.textContent = 'PENDING';
-    yBtn.className    = 'btn big';
-    nBtn.className    = 'btn big';
-    setStatus('receive-status', 'Awaiting your response...');
+    stamp.className = 'invite-card-stamp pending'; stamp.textContent = 'PENDING';
+    yBtn.className = 'btn big'; nBtn.className = 'btn big';
+    setStatus('receive-status','Awaiting your response...');
   }
-
   showScreen('screen-receive');
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('tab-receive').classList.add('active');
@@ -760,43 +665,31 @@ function openReceivedInvite(inv) {
 
 async function doRsvp(choice) {
   if (!state.activeInvite) return;
-  const inv   = state.activeInvite;
-  const yBtn  = document.getElementById('rsvp-yes-btn');
-  const nBtn  = document.getElementById('rsvp-no-btn');
+  const inv  = state.activeInvite;
+  const yBtn = document.getElementById('rsvp-yes-btn');
+  const nBtn = document.getElementById('rsvp-no-btn');
   yBtn.disabled = nBtn.disabled = true;
-
   try {
     await updateDoc(doc(db, 'invites', inv.id), { rsvp: choice });
     inv.rsvp = choice;
-
     const stamp = document.getElementById('receive-stamp');
     if (choice === 'yes') {
-      stamp.className   = 'invite-card-stamp yes';
-      stamp.textContent = 'GOING!';
-      yBtn.className    = 'btn big green-sel';
-      nBtn.className    = 'btn big';
-      setStatus('receive-status', "✔ You're going!");
-      showPopup({
-        titleIcon:'🎉', title:'RSVP Confirmed!',
-        icon:'🥳',
-        msg:`You're going to "${inv.title}"! 🎉`,
-        btns:[{ label:'WOO-HOO!', cb: closePopup }]
+      stamp.className = 'invite-card-stamp yes'; stamp.textContent = 'GOING!';
+      yBtn.className = 'btn big green-sel'; nBtn.className = 'btn big';
+      setStatus('receive-status',"✔ You're going!");
+      showPopup({ titleIcon:'🎉', title:'RSVP Confirmed!', icon:'🥳',
+        msg:`You're going to "${inv.title}"! 🎉`, btns:[{ label:'WOO-HOO!', cb:closePopup }]
       });
     } else {
-      stamp.className   = 'invite-card-stamp';
-      stamp.textContent = 'DECLINED';
-      yBtn.className    = 'btn big';
-      nBtn.className    = 'btn big red-sel';
-      setStatus('receive-status', '✘ You declined.');
-      showPopup({
-        titleIcon:'😢', title:'RSVP Sent',
-        icon:'😞',
-        msg:`You won't be attending "${inv.title}". You'll be missed!`,
-        btns:[{ label:'OK', cb: closePopup }]
+      stamp.className = 'invite-card-stamp'; stamp.textContent = 'DECLINED';
+      yBtn.className = 'btn big'; nBtn.className = 'btn big red-sel';
+      setStatus('receive-status','✘ You declined.');
+      showPopup({ titleIcon:'😢', title:'RSVP Sent', icon:'😞',
+        msg:`You won't be attending "${inv.title}". You'll be missed!`, btns:[{ label:'OK', cb:closePopup }]
       });
     }
   } catch(err) {
-    setStatus('receive-status', '❌ Error: ' + err.message);
+    setStatus('receive-status','❌ Error: ' + err.message);
   } finally {
     yBtn.disabled = nBtn.disabled = false;
   }
@@ -806,27 +699,21 @@ window.doRsvp = doRsvp;
 function doAddCalendar() {
   const inv = state.activeInvite;
   if (!inv) return;
-  const dt      = (inv.date||'').replace(/-/g,'');
-  const tm      = (inv.time||'1900').replace(':','');
-  const dtStart = dt + 'T' + tm + '00';
+  const dt  = (inv.date||'').replace(/-/g,'');
+  const tm  = (inv.time||'1900').replace(':','');
   const ics = [
-    'BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//EcoInvite//EN',
-    'BEGIN:VEVENT',
-    `DTSTART:${dtStart}`,
-    `SUMMARY:${inv.title}`,
+    'BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//EcoInvite//EN','BEGIN:VEVENT',
+    `DTSTART:${dt}T${tm}00`, `SUMMARY:${inv.title}`,
     `DESCRIPTION:${inv.details||''}`,
     `LOCATION:${(inv.location||'').replace(/,/g,'\\,')}`,
     'END:VEVENT','END:VCALENDAR'
   ].join('\r\n');
-
   const blob = new Blob([ics], { type:'text/calendar;charset=utf-8' });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
-  a.href     = url;
-  a.download = 'invite.ics';
-  a.click();
+  a.href = url; a.download = 'invite.ics'; a.click();
   URL.revokeObjectURL(url);
-  setStatus('receive-status', '📅 Calendar file downloaded!');
+  setStatus('receive-status','📅 Calendar file downloaded!');
 }
 window.doAddCalendar = doAddCalendar;
 
@@ -836,26 +723,21 @@ window.doAddCalendar = doAddCalendar;
 let cdInterval = null;
 
 function refreshCalendar() {
-  const all     = [...state.receivedInvites, ...state.sentInvites];
-  const now     = new Date();
-  const upcoming = all
-    .filter(e => e.date && new Date(e.date + 'T' + (e.time||'00:00')) > now)
-    .sort((a,b) => new Date(a.date) - new Date(b.date));
-
-  const cdArea = document.getElementById('countdown-area');
-  const noMsg  = document.getElementById('no-events-msg');
+  const all      = [...state.receivedInvites, ...state.sentInvites];
+  const now      = new Date();
+  const upcoming = all.filter(e => e.date && new Date(e.date + 'T' + (e.time||'00:00')) > now)
+                      .sort((a,b) => new Date(a.date) - new Date(b.date));
+  const cdArea   = document.getElementById('countdown-area');
+  const noMsg    = document.getElementById('no-events-msg');
 
   if (upcoming.length === 0) {
-    cdArea.style.display = 'none';
-    noMsg.style.display  = '';
+    cdArea.style.display = 'none'; noMsg.style.display = '';
     if (cdInterval) clearInterval(cdInterval);
   } else {
     const next = upcoming[0];
-    cdArea.style.display = '';
-    noMsg.style.display  = 'none';
+    cdArea.style.display = ''; noMsg.style.display = 'none';
     document.getElementById('cd-event-name').textContent = next.title;
     if (cdInterval) clearInterval(cdInterval);
-
     function tick() {
       const diff = new Date(next.date + 'T' + (next.time||'00:00')) - new Date();
       if (diff <= 0) { ['cd-days','cd-hours','cd-mins','cd-secs'].forEach(id => document.getElementById(id).textContent = '00'); return; }
@@ -864,8 +746,7 @@ function refreshCalendar() {
       document.getElementById('cd-mins').textContent  = String(Math.floor((diff%3600000)/60000)).padStart(2,'0');
       document.getElementById('cd-secs').textContent  = String(Math.floor((diff%60000)/1000)).padStart(2,'0');
     }
-    tick();
-    cdInterval = setInterval(tick, 1000);
+    tick(); cdInterval = setInterval(tick, 1000);
   }
 
   buildMiniCal(all);
@@ -874,31 +755,28 @@ function refreshCalendar() {
   if (all.length === 0) {
     listEl.innerHTML = `<span style="font-family:var(--font-mono);font-size:11px;color:#888;">No events yet.</span>`;
   } else {
-    listEl.innerHTML = [...all]
-      .sort((a,b) => new Date(a.date) - new Date(b.date))
-      .map(e => {
-        const isPast = e.date && new Date(e.date) < now;
-        const dir    = e.fromUid === state.uid ? '▲ Sent' : '▼ Received';
-        return `<div style="padding:4px 0;border-bottom:1px solid var(--mid);opacity:${isPast?0.5:1}">
-          <div style="font-family:var(--font-main);font-size:17px;">${e.title}</div>
-          <div style="font-family:var(--font-mono);font-size:10px;color:#555;">${dir} · ${formatDate(e.date)} · RSVP: ${(e.rsvp||'—').toUpperCase()}</div>
-        </div>`;
-      }).join('');
+    listEl.innerHTML = [...all].sort((a,b) => new Date(a.date) - new Date(b.date)).map(e => {
+      const isPast = e.date && new Date(e.date) < now;
+      const dir    = e.fromUid === state.uid ? '▲ Sent' : '▼ Received';
+      return `<div style="padding:4px 0;border-bottom:1px solid var(--mid);opacity:${isPast?0.5:1}">
+        <div style="font-family:var(--font-main);font-size:17px;">${e.title}</div>
+        <div style="font-family:var(--font-mono);font-size:10px;color:#555;">${dir} · ${formatDate(e.date)} · RSVP: ${(e.rsvp||'—').toUpperCase()}</div>
+      </div>`;
+    }).join('');
   }
 }
 window.refreshCalendar = refreshCalendar;
 
 function buildMiniCal(allEvents) {
-  const cal    = document.getElementById('mini-cal');
-  const now    = new Date();
-  const year   = now.getFullYear();
-  const month  = now.getMonth();
-  const first  = new Date(year, month, 1).getDay();
-  const days   = new Date(year, month+1, 0).getDate();
-  const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  const dayN   = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+  const cal      = document.getElementById('mini-cal');
+  const now      = new Date();
+  const year     = now.getFullYear();
+  const month    = now.getMonth();
+  const first    = new Date(year, month, 1).getDay();
+  const days     = new Date(year, month+1, 0).getDate();
+  const months   = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const dayN     = ['Su','Mo','Tu','We','Th','Fr','Sa'];
   const evtDates = new Set(allEvents.map(e => e.date));
-
   let html = `<div class="cal-header">${months[month]} ${year}</div><div class="cal-grid">`;
   dayN.forEach(d => { html += `<div class="cal-day-head">${d}</div>`; });
   for (let i = 0; i < first; i++) html += `<div class="cal-day other-month"></div>`;
@@ -916,259 +794,129 @@ function buildMiniCal(allEvents) {
 <style>
 @import url('https://fonts.googleapis.com/css2?family=VT323&family=Share+Tech+Mono&display=swap');
 
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{--gray:#c0c0c0;--white:#ffffff;--black:#000000;--dark:#0a0a0a;--shadow:#808080;--mid:#dfdfdf;--blue:#000080;--blue2:#1084d0;--teal:#008080;--green:#008000;--red:#800000;--yellow:#ffff00;--lt-green:#c8f0c8;--lt-red:#f0c8c8;--lt-yellow:#ffffc8;--font-main:'VT323',monospace;--font-mono:'Share Tech Mono',monospace}
+html,body{width:100%;height:100%;overflow:hidden}
+body{display:flex;align-items:center;justify-content:center;min-height:100vh;min-height:100dvh;background:radial-gradient(ellipse at center,#1a1a2e 0%,#0d0d0d 100%)}
 
-:root {
-  --gray:     #c0c0c0;
-  --white:    #ffffff;
-  --black:    #000000;
-  --dark:     #0a0a0a;
-  --shadow:   #808080;
-  --mid:      #dfdfdf;
-  --blue:     #000080;
-  --blue2:    #1084d0;
-  --teal:     #008080;
-  --green:    #008000;
-  --red:      #800000;
-  --yellow:   #ffff00;
-  --lt-green: #c8f0c8;
-  --lt-red:   #f0c8c8;
-  --lt-yellow:#ffffc8;
-  --font-main: 'VT323', monospace;
-  --font-mono: 'Share Tech Mono', monospace;
-}
+.phone-shell{width:100%;height:100vh;height:100dvh;position:relative;display:flex;flex-direction:column;background:transparent;border-radius:0;padding:0}
+@media(min-width:500px)and(min-height:700px){.phone-shell{width:min(390px,90vw);height:min(844px,95vh);height:min(844px,95dvh);background:#1a1a1a;border-radius:50px;padding:14px;box-shadow:0 0 0 2px #333,0 0 0 4px #222,0 40px 80px rgba(0,0,0,.8),inset 0 0 0 1px #444}}
 
-html, body { width:100%; height:100%; overflow:hidden; }
+.phone-notch{width:130px;height:30px;background:#1a1a1a;border-radius:0 0 18px 18px;position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:10;display:none;align-items:center;justify-content:center;gap:6px}
+@media(min-width:500px)and(min-height:700px){.phone-notch{display:flex}}
+.notch-cam{width:10px;height:10px;background:#2a2a2a;border-radius:50%;border:1px solid #333}
+.notch-speaker{width:60px;height:5px;background:#2a2a2a;border-radius:3px}
 
-body {
-  display:flex; align-items:center; justify-content:center;
-  min-height:100vh; min-height:100dvh;
-  background: radial-gradient(ellipse at center, #1a1a2e 0%, #0d0d0d 100%);
-}
+.phone-screen{flex:1;background:var(--teal);border-radius:0;overflow:hidden;position:relative;display:flex;flex-direction:column;min-height:0}
+@media(min-width:500px)and(min-height:700px){.phone-screen{border-radius:36px}}
+.phone-screen::before{content:'';position:absolute;inset:0;pointer-events:none;z-index:0;background-image:url("data:image/svg+xml,%3Csvg width='4' height='4' xmlns='http://www.w3.org/2000/svg'%3E%3Crect x='0' y='0' width='2' height='2' fill='%23008080'/%3E%3Crect x='2' y='2' width='2' height='2' fill='%23008080'/%3E%3Crect x='0' y='2' width='2' height='2' fill='%23007070'/%3E%3Crect x='2' y='0' width='2' height='2' fill='%23007070'/%3E%3C/svg%3E")}
 
-/* ── PHONE SHELL ── */
-.phone-shell {
-  width:100%; height:100vh; height:100dvh;
-  position:relative; display:flex; flex-direction:column;
-  background:transparent; border-radius:0; padding:0;
-}
+.screen{position:absolute;inset:0;display:none;flex-direction:column;z-index:1;overflow-y:auto;overflow-x:hidden;padding-bottom:calc(52px + env(safe-area-inset-bottom,0px));padding-top:env(safe-area-inset-top,0px)}
+.screen.active{display:flex}
+@media(min-width:500px)and(min-height:700px){.screen{padding-top:0}}
+.screen::-webkit-scrollbar{width:6px}
+.screen::-webkit-scrollbar-track{background:var(--gray)}
+.screen::-webkit-scrollbar-thumb{background:var(--shadow);border-top:1px solid var(--white);border-left:1px solid var(--white)}
 
-@media (min-width:500px) and (min-height:700px) {
-  .phone-shell {
-    width:min(390px,90vw); height:min(844px,95vh); height:min(844px,95dvh);
-    background:#1a1a1a; border-radius:50px; padding:14px;
-    box-shadow:0 0 0 2px #333,0 0 0 4px #222,0 40px 80px rgba(0,0,0,.8),inset 0 0 0 1px #444;
-  }
-}
+.win{background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);margin:8px;flex-shrink:0;max-width:100%;overflow-wrap:break-word;word-break:break-word}
+.win-title{background:linear-gradient(90deg,var(--blue) 0%,var(--blue2) 100%);color:white;font-family:var(--font-main);font-size:clamp(14px,4.5vw,18px);padding:2px 6px;display:flex;align-items:center;gap:5px;user-select:none;min-height:24px;overflow:hidden}
+.win-btns{margin-left:auto;display:flex;gap:2px}
+.wbtn{background:var(--gray);border-top:1px solid var(--white);border-left:1px solid var(--white);border-right:1px solid var(--dark);border-bottom:1px solid var(--dark);width:14px;height:12px;font-size:8px;font-family:var(--font-main);cursor:pointer;display:flex;align-items:center;justify-content:center;color:#000;line-height:1}
+.win-body{padding:10px}
 
-.phone-notch {
-  width:130px; height:30px; background:#1a1a1a;
-  border-radius:0 0 18px 18px; position:absolute;
-  top:14px; left:50%; transform:translateX(-50%);
-  z-index:10; display:none; align-items:center; justify-content:center; gap:6px;
-}
-@media (min-width:500px) and (min-height:700px) { .phone-notch { display:flex; } }
+.inset{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:8px;margin-bottom:8px;font-family:var(--font-mono);font-size:12px;line-height:1.7;overflow-wrap:break-word;word-break:break-word}
 
-.notch-cam    { width:10px;height:10px;background:#2a2a2a;border-radius:50%;border:1px solid #333; }
-.notch-speaker{ width:60px;height:5px;background:#2a2a2a;border-radius:3px; }
+.btn{font-family:var(--font-main);font-size:20px;padding:3px 12px;background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);cursor:pointer;color:#000;letter-spacing:.5px;display:inline-flex;align-items:center;gap:5px}
+.btn:active{border-top:2px solid var(--dark);border-left:2px solid var(--dark);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding-top:5px;padding-left:14px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.full{width:100%;justify-content:center;margin-bottom:6px}
+.btn.big{font-size:clamp(18px,6vw,24px);padding:6px 14px}
+.btn.green-sel{background:var(--lt-green)}
+.btn.red-sel{background:var(--lt-red)}
 
-.phone-screen {
-  flex:1; background:var(--teal); border-radius:0;
-  overflow:hidden; position:relative; display:flex; flex-direction:column; min-height:0;
-}
-@media (min-width:500px) and (min-height:700px) { .phone-screen { border-radius:36px; } }
+.field-row{display:flex;flex-direction:column;gap:2px;margin-bottom:8px}
+.field-row label{font-family:var(--font-main);font-size:18px;letter-spacing:.5px}
+.field-row input,.field-row textarea,.field-row select{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:3px 6px;font-family:var(--font-mono);font-size:12px;outline:none;width:100%;resize:none}
+.field-row input:focus,.field-row textarea:focus{outline:1px dotted var(--blue);outline-offset:-1px}
 
-.phone-screen::before {
-  content:''; position:absolute; inset:0;
-  background-image:url("data:image/svg+xml,%3Csvg width='4' height='4' xmlns='http://www.w3.org/2000/svg'%3E%3Crect x='0' y='0' width='2' height='2' fill='%23008080'/%3E%3Crect x='2' y='2' width='2' height='2' fill='%23008080'/%3E%3Crect x='0' y='2' width='2' height='2' fill='%23007070'/%3E%3Crect x='2' y='0' width='2' height='2' fill='%23007070'/%3E%3C/svg%3E");
-  pointer-events:none; z-index:0;
-}
+.divider{height:2px;background:var(--shadow);border-bottom:1px solid var(--white);margin:8px 0}
 
-/* ── SCREENS ── */
-.screen {
-  position:absolute; inset:0; display:none; flex-direction:column;
-  z-index:1; overflow-y:auto; overflow-x:hidden;
-  padding-bottom:calc(52px + env(safe-area-inset-bottom,0px));
-  padding-top:env(safe-area-inset-top,0px);
-}
-.screen.active { display:flex; }
-@media (min-width:500px) and (min-height:700px) { .screen { padding-top:0; } }
-.screen::-webkit-scrollbar{width:6px;}
-.screen::-webkit-scrollbar-track{background:var(--gray);}
-.screen::-webkit-scrollbar-thumb{background:var(--shadow);border-top:1px solid var(--white);border-left:1px solid var(--white);}
+.status-bar{background:var(--gray);border-top:1px solid var(--shadow);padding:2px 6px;font-family:var(--font-main);font-size:15px;display:flex;gap:4px}
+.status-panel{border-top:1px solid var(--shadow);border-left:1px solid var(--shadow);border-right:1px solid var(--white);border-bottom:1px solid var(--white);padding:1px 6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
-/* ── WIN98 WINDOW ── */
-.win {
-  background:var(--gray);
-  border-top:2px solid var(--white); border-left:2px solid var(--white);
-  border-right:2px solid var(--dark); border-bottom:2px solid var(--dark);
-  margin:8px; flex-shrink:0; max-width:100%; overflow-wrap:break-word; word-break:break-word;
-}
-.win-title {
-  background:linear-gradient(90deg,var(--blue) 0%,var(--blue2) 100%);
-  color:white; font-family:var(--font-main); font-size:clamp(14px,4.5vw,18px);
-  padding:2px 6px; display:flex; align-items:center; gap:5px; user-select:none;
-  min-height:24px; overflow:hidden;
-}
-.win-btns { margin-left:auto; display:flex; gap:2px; }
-.wbtn {
-  background:var(--gray);
-  border-top:1px solid var(--white); border-left:1px solid var(--white);
-  border-right:1px solid var(--dark); border-bottom:1px solid var(--dark);
-  width:14px;height:12px;font-size:8px;font-family:var(--font-main);cursor:pointer;
-  display:flex;align-items:center;justify-content:center;color:#000;line-height:1;
-}
-.win-body { padding:10px; }
+.taskbar{position:absolute;bottom:0;left:0;right:0;background:var(--gray);border-top:2px solid var(--white);display:flex;align-items:center;padding:0 6px;padding-bottom:env(safe-area-inset-bottom,0px);gap:4px;z-index:50;min-height:52px}
+.tab-btn{font-family:var(--font-main);font-size:13px;letter-spacing:.3px;padding:2px 4px;background:var(--gray);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);flex:1;cursor:pointer;text-align:center;color:#000;line-height:1.2;height:36px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.tab-btn.active{border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--shadow);border-bottom:2px solid var(--shadow)}
+.tab-btn .tab-icon{font-size:16px}
+.tab-btn .tab-label{font-size:10px}
+.taskbar-clock{font-family:var(--font-mono);font-size:10px;border-top:1px solid var(--shadow);border-left:1px solid var(--shadow);border-right:1px solid var(--white);border-bottom:1px solid var(--white);padding:2px 5px;text-align:center;line-height:1.4;white-space:nowrap}
 
-/* ── INSET ── */
-.inset {
-  background:var(--white);
-  border-top:2px solid var(--shadow); border-left:2px solid var(--shadow);
-  border-right:2px solid var(--white); border-bottom:2px solid var(--white);
-  padding:8px; margin-bottom:8px; font-family:var(--font-mono); font-size:12px; line-height:1.7;
-  overflow-wrap:break-word; word-break:break-word;
-}
+.popup-overlay{display:none;position:absolute;inset:0;background:rgba(0,0,0,.35);z-index:200;align-items:center;justify-content:center;padding:16px}
+.popup-overlay.show{display:flex}
+.popup-win{background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);width:100%;max-width:300px;max-height:90vh;overflow-y:auto}
+.popup-body{padding:14px 12px 10px;text-align:center}
+.popup-icon{font-size:36px;display:block;margin-bottom:6px}
+.popup-msg{font-family:var(--font-main);font-size:20px;line-height:1.3;margin-bottom:12px}
+.popup-code{font-family:var(--font-mono);font-size:22px;letter-spacing:4px;background:var(--lt-yellow);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:6px 10px;display:inline-block;margin-bottom:10px}
+.popup-btns{display:flex;gap:6px;justify-content:center;flex-wrap:wrap}
+.popup-loading{font-family:var(--font-mono);font-size:11px;color:#555;padding:8px 0}
+.loading-dots::after{content:'...';animation:ldots 1.2s steps(4,end) infinite}
+@keyframes ldots{0%{content:'.'}33%{content:'..'}66%{content:'...'}100%{content:''}}
 
-/* ── BUTTONS ── */
-.btn {
-  font-family:var(--font-main); font-size:20px; padding:3px 12px;
-  background:var(--gray);
-  border-top:2px solid var(--white); border-left:2px solid var(--white);
-  border-right:2px solid var(--dark); border-bottom:2px solid var(--dark);
-  cursor:pointer; color:#000; letter-spacing:.5px; display:inline-flex; align-items:center; gap:5px;
-}
-.btn:active,.btn.pressed {
-  border-top:2px solid var(--dark); border-left:2px solid var(--dark);
-  border-right:2px solid var(--white); border-bottom:2px solid var(--white);
-  padding-top:5px; padding-left:14px;
-}
-.btn:disabled { opacity:.5; cursor:not-allowed; }
-.btn.full  { width:100%; justify-content:center; margin-bottom:6px; }
-.btn.big   { font-size:clamp(18px,6vw,24px); padding:6px 14px; }
-.btn.green-sel { background:var(--lt-green); }
-.btn.red-sel   { background:var(--lt-red);   }
+#screen-boot{background:#000;align-items:center;justify-content:center;padding-bottom:0 !important;padding-top:0 !important}
+.boot-logo{font-family:var(--font-main);font-size:clamp(36px,12vw,48px);color:var(--gray);letter-spacing:3px;text-align:center;line-height:1;margin-bottom:6px}
+.boot-sub{font-family:var(--font-mono);font-size:11px;color:#666;letter-spacing:2px;margin-bottom:30px}
+.boot-bar-wrap{width:200px;height:20px;background:#000;border:2px solid #555;margin-bottom:10px;overflow:hidden}
+.boot-bar-fill{height:100%;background:var(--blue2);width:0%;transition:width .3s}
+.boot-status{font-family:var(--font-mono);font-size:11px;color:#555}
 
-/* ── INPUTS ── */
-.field-row { display:flex; flex-direction:column; gap:2px; margin-bottom:8px; }
-.field-row label { font-family:var(--font-main); font-size:18px; letter-spacing:.5px; }
-.field-row input, .field-row textarea, .field-row select {
-  background:var(--white);
-  border-top:2px solid var(--shadow); border-left:2px solid var(--shadow);
-  border-right:2px solid var(--white); border-bottom:2px solid var(--white);
-  padding:3px 6px; font-family:var(--font-mono); font-size:12px; outline:none; width:100%; resize:none;
-}
-.field-row input:focus,.field-row textarea:focus,.field-row select:focus {
-  outline:1px dotted var(--blue); outline-offset:-1px;
-}
+#screen-welcome{justify-content:flex-start;padding:0}
+.welcome-inner{padding:16px 8px 8px}
+@media(min-width:500px)and(min-height:700px){#screen-welcome{justify-content:center}.welcome-inner{padding:60px 8px 8px}}
+.app-logo-big{font-family:var(--font-main);font-size:clamp(32px,10vw,46px);color:var(--blue);text-align:center;letter-spacing:2px;line-height:1;text-shadow:2px 2px 0 rgba(0,0,128,.25)}
+.app-tagline{font-family:var(--font-mono);font-size:11px;text-align:center;color:#444;margin-bottom:14px;letter-spacing:1px}
 
-/* ── DIVIDER ── */
-.divider { height:2px; background:var(--shadow); border-bottom:1px solid var(--white); margin:8px 0; }
+.eco-badge{background:var(--lt-green);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:4px 8px;font-family:var(--font-main);font-size:clamp(13px,4vw,17px);margin-bottom:8px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;word-break:break-all}
 
-/* ── STATUS BAR ── */
-.status-bar { background:var(--gray); border-top:1px solid var(--shadow); padding:2px 6px; font-family:var(--font-main); font-size:15px; display:flex; gap:4px; }
-.status-panel { border-top:1px solid var(--shadow); border-left:1px solid var(--shadow); border-right:1px solid var(--white); border-bottom:1px solid var(--white); padding:1px 6px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.member-item{display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid var(--mid);font-family:var(--font-mono);font-size:12px}
+.member-dot{width:8px;height:8px;background:var(--green);border-radius:50%;flex-shrink:0}
 
-/* ── TASKBAR ── */
-.taskbar {
-  position:absolute; bottom:0; left:0; right:0;
-  background:var(--gray); border-top:2px solid var(--white);
-  display:flex; align-items:center; padding:0 6px;
-  padding-bottom:env(safe-area-inset-bottom,0px);
-  gap:4px; z-index:50; min-height:52px;
-}
-.tab-btn {
-  font-family:var(--font-main); font-size:13px; letter-spacing:.3px; padding:2px 4px;
-  background:var(--gray);
-  border-top:2px solid var(--shadow); border-left:2px solid var(--shadow);
-  border-right:2px solid var(--white); border-bottom:2px solid var(--white);
-  flex:1; cursor:pointer; text-align:center; color:#000; line-height:1.2;
-  height:36px; display:flex; flex-direction:column; align-items:center; justify-content:center;
-}
-.tab-btn.active { border-top:2px solid var(--white); border-left:2px solid var(--white); border-right:2px solid var(--shadow); border-bottom:2px solid var(--shadow); }
-.tab-btn .tab-icon  { font-size:16px; }
-.tab-btn .tab-label { font-size:10px; }
-.taskbar-clock { font-family:var(--font-mono); font-size:10px; border-top:1px solid var(--shadow); border-left:1px solid var(--shadow); border-right:1px solid var(--white); border-bottom:1px solid var(--white); padding:2px 5px; text-align:center; line-height:1.4; white-space:nowrap; }
+.invite-card{background:var(--lt-yellow);border:2px dashed var(--shadow);padding:10px;margin-bottom:8px;font-family:var(--font-mono);font-size:12px;position:relative;overflow-wrap:break-word;word-break:break-word}
+.invite-card-title{font-family:var(--font-main);font-size:clamp(18px,6vw,26px);color:var(--blue);margin-bottom:4px;letter-spacing:1px;padding-right:60px}
+.invite-card-stamp{position:absolute;top:8px;right:8px;font-family:var(--font-main);font-size:clamp(14px,4.5vw,24px);color:var(--red);border:3px solid var(--red);padding:0 4px;transform:rotate(12deg);opacity:.8;line-height:1;white-space:nowrap}
+.invite-card-stamp.yes{color:var(--green);border-color:var(--green);transform:rotate(-8deg)}
+.invite-card-stamp.pending{color:#888;border-color:#888}
 
-/* ── POPUP ── */
-.popup-overlay { display:none; position:absolute; inset:0; background:rgba(0,0,0,.35); z-index:200; align-items:center; justify-content:center; padding:16px; }
-.popup-overlay.show { display:flex; }
-.popup-win { background:var(--gray); border-top:2px solid var(--white); border-left:2px solid var(--white); border-right:2px solid var(--dark); border-bottom:2px solid var(--dark); width:100%; max-width:300px; max-height:90vh; overflow-y:auto; }
-.popup-body { padding:14px 12px 10px; text-align:center; }
-.popup-icon { font-size:36px; display:block; margin-bottom:6px; }
-.popup-msg  { font-family:var(--font-main); font-size:20px; line-height:1.3; margin-bottom:12px; }
-.popup-code { font-family:var(--font-mono); font-size:22px; letter-spacing:4px; background:var(--lt-yellow); border-top:2px solid var(--shadow); border-left:2px solid var(--shadow); border-right:2px solid var(--white); border-bottom:2px solid var(--white); padding:6px 10px; display:inline-block; margin-bottom:10px; }
-.popup-btns { display:flex; gap:6px; justify-content:center; flex-wrap:wrap; }
-.popup-loading { font-family:var(--font-mono); font-size:11px; color:#555; padding:8px 0; }
-.loading-dots::after { content:'...'; animation:ldots 1.2s steps(4,end) infinite; }
-@keyframes ldots { 0%{content:'.'} 33%{content:'..'} 66%{content:'...'} 100%{content:''} }
+.countdown-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px}
+.cd-block{background:var(--blue);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);padding:8px 4px;text-align:center}
+.cd-num{font-family:var(--font-main);font-size:clamp(32px,10vw,48px);color:var(--yellow);line-height:1;display:block}
+.cd-label{font-family:var(--font-mono);font-size:10px;color:#aaa;letter-spacing:2px}
 
-/* ── BOOT ── */
-#screen-boot { background:#000; align-items:center; justify-content:center; padding-bottom:0 !important; padding-top:0 !important; }
-.boot-logo   { font-family:var(--font-main); font-size:clamp(36px,12vw,48px); color:var(--gray); letter-spacing:3px; text-align:center; line-height:1; margin-bottom:6px; }
-.boot-sub    { font-family:var(--font-mono); font-size:11px; color:#666; letter-spacing:2px; margin-bottom:30px; }
-.boot-bar-wrap{ width:200px;height:20px;background:#000;border:2px solid #555;margin-bottom:10px;overflow:hidden; }
-.boot-bar-fill{ height:100%;background:var(--blue2);width:0%;transition:width .3s; }
-.boot-status { font-family:var(--font-mono); font-size:11px; color:#555; }
+.mini-cal{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:6px;margin-bottom:8px}
+.cal-header{font-family:var(--font-main);font-size:20px;text-align:center;margin-bottom:6px;color:var(--blue)}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:1px;text-align:center;font-family:var(--font-mono);font-size:10px}
+.cal-day-head{color:var(--blue);font-weight:bold;padding:2px 0}
+.cal-day{padding:3px 2px}
+.cal-day.today{background:var(--blue);color:var(--white)}
+.cal-day.event-day{background:var(--yellow);color:var(--black);font-weight:bold;border:1px solid var(--shadow)}
+.cal-day.other-month{color:#999}
 
-/* ── WELCOME ── */
-#screen-welcome { justify-content:flex-start; padding:0; }
-.welcome-inner  { padding:16px 8px 8px; }
-@media (min-width:500px) and (min-height:700px) { #screen-welcome { justify-content:center; } .welcome-inner { padding:60px 8px 8px; } }
-.app-logo-big { font-family:var(--font-main); font-size:clamp(32px,10vw,46px); color:var(--blue); text-align:center; letter-spacing:2px; line-height:1; text-shadow:2px 2px 0 rgba(0,0,128,.25); }
-.app-tagline  { font-family:var(--font-mono); font-size:11px; text-align:center; color:#444; margin-bottom:14px; letter-spacing:1px; }
+.contact-item{display:flex;align-items:center;gap:6px;padding:4px 6px;border-bottom:1px solid var(--mid);font-family:var(--font-mono);font-size:12px;cursor:pointer}
+.contact-item:hover,.contact-item.selected-contact{background:var(--blue);color:var(--white)}
+.contact-item:hover .member-dot,.contact-item.selected-contact .member-dot{background:var(--yellow)}
 
-/* ── ECO BADGE ── */
-.eco-badge { background:var(--lt-green); border-top:2px solid var(--shadow); border-left:2px solid var(--shadow); border-right:2px solid var(--white); border-bottom:2px solid var(--white); padding:4px 8px; font-family:var(--font-main); font-size:clamp(13px,4vw,17px); margin-bottom:8px; display:flex; flex-wrap:wrap; gap:4px; align-items:center; word-break:break-all; }
+.step-dots{display:flex;gap:6px;justify-content:center;margin-bottom:8px}
+.step-dot{width:8px;height:8px;background:var(--shadow);border-radius:50%}
+.step-dot.done{background:var(--blue2)}
+.step-dot.current{background:var(--blue);border:2px solid var(--dark)}
 
-/* ── MEMBERS ── */
-.member-item  { display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid var(--mid);font-family:var(--font-mono);font-size:12px; }
-.member-dot   { width:8px;height:8px;background:var(--green);border-radius:50%;flex-shrink:0; }
+.ticker{background:var(--blue);color:var(--yellow);font-family:var(--font-main);font-size:14px;padding:2px 0;overflow:hidden;white-space:nowrap;flex-shrink:0}
+.ticker-inner{display:inline-block;animation:scroll-left 18s linear infinite;padding-left:100%}
+@keyframes scroll-left{from{transform:translateX(0)}to{transform:translateX(-100%)}}
 
-/* ── INVITE CARD ── */
-.invite-card       { background:var(--lt-yellow);border:2px dashed var(--shadow);padding:10px;margin-bottom:8px;font-family:var(--font-mono);font-size:12px;position:relative;overflow-wrap:break-word;word-break:break-word; }
-.invite-card-title { font-family:var(--font-main);font-size:clamp(18px,6vw,26px);color:var(--blue);margin-bottom:4px;letter-spacing:1px;padding-right:60px; }
-.invite-card-stamp { position:absolute;top:8px;right:8px;font-family:var(--font-main);font-size:clamp(14px,4.5vw,24px);color:var(--red);border:3px solid var(--red);padding:0 4px;transform:rotate(12deg);opacity:.8;line-height:1;white-space:nowrap; }
-.invite-card-stamp.yes     { color:var(--green);border-color:var(--green);transform:rotate(-8deg); }
-.invite-card-stamp.pending { color:#888;border-color:#888; }
-
-/* ── COUNTDOWN ── */
-.countdown-grid { display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px; }
-.cd-block { background:var(--blue);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);padding:8px 4px;text-align:center; }
-.cd-num   { font-family:var(--font-main);font-size:clamp(32px,10vw,48px);color:var(--yellow);line-height:1;display:block; }
-.cd-label { font-family:var(--font-mono);font-size:10px;color:#aaa;letter-spacing:2px; }
-
-/* ── MINI CALENDAR ── */
-.mini-cal   { background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:6px;margin-bottom:8px; }
-.cal-header { font-family:var(--font-main);font-size:20px;text-align:center;margin-bottom:6px;color:var(--blue); }
-.cal-grid   { display:grid;grid-template-columns:repeat(7,1fr);gap:1px;text-align:center;font-family:var(--font-mono);font-size:10px; }
-.cal-day-head { color:var(--blue);font-weight:bold;padding:2px 0; }
-.cal-day    { padding:3px 2px; }
-.cal-day.today     { background:var(--blue);color:var(--white); }
-.cal-day.event-day { background:var(--yellow);color:var(--black);font-weight:bold;border:1px solid var(--shadow); }
-.cal-day.other-month { color:#999; }
-
-/* ── CONTACTS ── */
-.contact-item { display:flex;align-items:center;gap:6px;padding:4px 6px;border-bottom:1px solid var(--mid);font-family:var(--font-mono);font-size:12px;cursor:pointer; }
-.contact-item:hover,.contact-item.selected-contact { background:var(--blue);color:var(--white); }
-.contact-item:hover .member-dot,.contact-item.selected-contact .member-dot { background:var(--yellow); }
-
-/* ── STEP DOTS ── */
-.step-dots { display:flex;gap:6px;justify-content:center;margin-bottom:8px; }
-.step-dot  { width:8px;height:8px;background:var(--shadow);border-radius:50%; }
-.step-dot.done    { background:var(--blue2); }
-.step-dot.current { background:var(--blue);border:2px solid var(--dark); }
-
-/* ── TICKER ── */
-.ticker       { background:var(--blue);color:var(--yellow);font-family:var(--font-main);font-size:14px;padding:2px 0;overflow:hidden;white-space:nowrap;flex-shrink:0; }
-.ticker-inner { display:inline-block;animation:scroll-left 18s linear infinite;padding-left:100%; }
-@keyframes scroll-left { from{transform:translateX(0)} to{transform:translateX(-100%)} }
-
-/* ── BLINK ── */
-@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
-.blink { animation:blink 1s step-end infinite; }
-
-/* ── GLOBAL OVERFLOW PREVENTION ── */
-img,video { max-width:100%; }
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+.blink{animation:blink 1s step-end infinite}
+img,video{max-width:100%}
 </style>
 </head>
 <body>
@@ -1182,7 +930,7 @@ img,video { max-width:100%; }
 
   <div class="phone-screen">
 
-    <!-- ════════════ BOOT ════════════ -->
+    <!-- BOOT -->
     <div class="screen active" id="screen-boot">
       <div class="boot-logo">ECO<br>INVITE</div>
       <div class="boot-sub">v2.0 · RETRO RSVP SYSTEM</div>
@@ -1190,17 +938,12 @@ img,video { max-width:100%; }
       <div class="boot-status" id="boot-status">Loading...</div>
     </div>
 
-    <!-- ════════════ WELCOME ════════════ -->
+    <!-- WELCOME -->
     <div class="screen" id="screen-welcome">
-      <div class="ticker">
-        <span class="ticker-inner">★ WELCOME TO ECOINVITE ★ THE RETRO RSVP SYSTEM ★ SHARE YOUR CODE ★ BUILD YOUR ECOSYSTEM ★ SEND INVITES THE OLD WAY ★&nbsp;</span>
-      </div>
+      <div class="ticker"><span class="ticker-inner">★ WELCOME TO ECOINVITE ★ THE RETRO RSVP SYSTEM ★ SHARE YOUR CODE ★ BUILD YOUR ECOSYSTEM ★ SEND INVITES THE OLD WAY ★&nbsp;</span></div>
       <div class="welcome-inner">
         <div class="win">
-          <div class="win-title">
-            <span>📬</span> EcoInvite — Welcome
-            <div class="win-btns"><div class="wbtn">_</div><div class="wbtn">□</div><div class="wbtn">✕</div></div>
-          </div>
+          <div class="win-title"><span>📬</span> EcoInvite — Welcome<div class="win-btns"><div class="wbtn">_</div><div class="wbtn">□</div><div class="wbtn">✕</div></div></div>
           <div class="win-body">
             <div class="app-logo-big">📬 ECOINVITE</div>
             <div class="app-tagline">INVITE PEOPLE. BUILD YOUR CIRCLE.</div>
@@ -1214,74 +957,47 @@ img,video { max-width:100%; }
       </div>
     </div>
 
-    <!-- ════════════ HOME / ECO ════════════ -->
+    <!-- HOME -->
     <div class="screen" id="screen-home">
-      <div class="ticker">
-        <span class="ticker-inner" id="home-ticker">★ YOUR ECOSYSTEM IS ACTIVE ★ SEND INVITES TO YOUR CIRCLE ★&nbsp;</span>
-      </div>
-
+      <div class="ticker"><span class="ticker-inner" id="home-ticker">★ YOUR ECOSYSTEM IS ACTIVE ★ SEND INVITES TO YOUR CIRCLE ★&nbsp;</span></div>
       <div class="win" style="margin-top:8px;">
-        <div class="win-title">
-          <span>🌐</span> <span id="eco-name-display">My Eco</span> — Dashboard
-          <div class="win-btns"><div class="wbtn">_</div><div class="wbtn">□</div><div class="wbtn">✕</div></div>
-        </div>
+        <div class="win-title"><span>🌐</span> <span id="eco-name-display">My Eco</span> — Dashboard<div class="win-btns"><div class="wbtn">_</div><div class="wbtn">□</div><div class="wbtn">✕</div></div></div>
         <div class="win-body">
-          <div class="eco-badge">
-            🟢 <span id="home-eco-code-display">ECO: ------</span> &nbsp;·&nbsp; <span id="home-member-count">1 member</span>
-          </div>
+          <div class="eco-badge">🟢 <span id="home-eco-code-display">ECO: ------</span> &nbsp;·&nbsp; <span id="home-member-count">1 member</span></div>
           <div style="font-family:var(--font-main);font-size:16px;color:#444;margin-bottom:4px;">► MEMBERS:</div>
-          <div class="inset" id="member-list-home" style="max-height:80px;overflow-y:auto;">
-            <span style="color:#888;font-family:var(--font-mono);font-size:11px;">Loading members...</span>
-          </div>
+          <div class="inset" id="member-list-home" style="max-height:80px;overflow-y:auto;"><span style="color:#888;font-family:var(--font-mono);font-size:11px;">Loading members...</span></div>
           <button class="btn full" onclick="showInviteCode()">📋 Share Ecosystem Code</button>
           <button class="btn full" onclick="showAddMember()">➕ Add Member by Code</button>
         </div>
       </div>
-
       <div class="win">
         <div class="win-title"><span>✉️</span> New Invite</div>
-        <div class="win-body">
-          <button class="btn full big" onclick="goToSendInvite()">✉️ SEND AN INVITE</button>
-        </div>
+        <div class="win-body"><button class="btn full big" onclick="goToSendInvite()">✉️ SEND AN INVITE</button></div>
       </div>
-
       <div class="win">
-        <div class="win-title"><span>📥</span> Incoming Invites <span class="blink" style="font-size:12px;" id="inbox-dot" style="display:none;">●</span></div>
+        <div class="win-title"><span>📥</span> Incoming Invites <span class="blink" style="font-size:12px;">●</span></div>
         <div class="win-body">
-          <div id="incoming-invites-list">
-            <div style="font-family:var(--font-mono);font-size:12px;color:#888;text-align:center;padding:8px;">No incoming invites yet.</div>
-          </div>
+          <div id="incoming-invites-list"><div style="font-family:var(--font-mono);font-size:12px;color:#888;text-align:center;padding:8px;">No incoming invites yet.</div></div>
         </div>
       </div>
     </div>
 
-    <!-- ════════════ SEND INVITE ════════════ -->
+    <!-- SEND -->
     <div class="screen" id="screen-send">
       <div class="win" style="margin-top:8px;">
-        <div class="win-title">
-          <span>✉️</span> Compose Invite
-          <div class="win-btns"><div class="wbtn" onclick="showMainTab('screen-home','tab-home')">✕</div></div>
-        </div>
+        <div class="win-title"><span>✉️</span> Compose Invite<div class="win-btns"><div class="wbtn" onclick="showMainTab('screen-home','tab-home')">✕</div></div></div>
         <div class="win-body">
           <div class="step-dots">
             <div class="step-dot current" id="dot1"></div>
             <div class="step-dot" id="dot2"></div>
             <div class="step-dot" id="dot3"></div>
           </div>
-
-          <!-- Step 1: Recipient -->
           <div id="send-step-1">
             <div style="font-family:var(--font-main);font-size:18px;margin-bottom:6px;">► SELECT RECIPIENT:</div>
-            <div class="inset" id="contact-picker" style="padding:4px;max-height:120px;overflow-y:auto;">
-              <div style="font-family:var(--font-mono);font-size:11px;color:#888;padding:4px;">No members yet.</div>
-            </div>
-            <div style="font-family:var(--font-mono);font-size:11px;color:#666;margin-bottom:8px;">
-              Selected: <span id="selected-recipient-name">—</span>
-            </div>
+            <div class="inset" id="contact-picker" style="padding:4px;max-height:120px;overflow-y:auto;"><div style="font-family:var(--font-mono);font-size:11px;color:#888;padding:4px;">No members yet.</div></div>
+            <div style="font-family:var(--font-mono);font-size:11px;color:#666;margin-bottom:8px;">Selected: <span id="selected-recipient-name">—</span></div>
             <button class="btn full" onclick="sendStep(2)">NEXT ►</button>
           </div>
-
-          <!-- Step 2: Details -->
           <div id="send-step-2" style="display:none;">
             <div class="field-row"><label>📋 EVENT TITLE:</label><input type="text" id="inv-title" placeholder="e.g. Birthday Bash" maxlength="40"></div>
             <div class="field-row"><label>📅 DATE:</label><input type="date" id="inv-date"></div>
@@ -1293,15 +1009,9 @@ img,video { max-width:100%; }
               <button class="btn" onclick="sendStep(3)" style="flex:2;">PREVIEW ►</button>
             </div>
           </div>
-
-          <!-- Step 3: Preview -->
           <div id="send-step-3" style="display:none;">
             <div style="font-family:var(--font-main);font-size:18px;margin-bottom:6px;">► PREVIEW:</div>
-            <div class="invite-card" id="invite-preview">
-              <div class="invite-card-stamp pending">DRAFT</div>
-              <div class="invite-card-title" id="prev-title">—</div>
-              <div id="prev-details" style="line-height:1.7;"></div>
-            </div>
+            <div class="invite-card"><div class="invite-card-stamp pending">DRAFT</div><div class="invite-card-title" id="prev-title">—</div><div id="prev-details" style="line-height:1.7;"></div></div>
             <div style="display:flex;gap:6px;">
               <button class="btn" onclick="sendStep(2)" style="flex:1;">◄ BACK</button>
               <button class="btn big" onclick="sendInvite()" style="flex:2;background:var(--lt-green);">📤 SEND!</button>
@@ -1312,25 +1022,16 @@ img,video { max-width:100%; }
       </div>
     </div>
 
-    <!-- ════════════ RECEIVE ════════════ -->
+    <!-- RECEIVE -->
     <div class="screen" id="screen-receive">
       <div class="win" style="margin-top:8px;">
-        <div class="win-title">
-          <span>📥</span> Incoming Invite
-          <div class="win-btns"><div class="wbtn" onclick="showMainTab('screen-home','tab-home')">✕</div></div>
-        </div>
+        <div class="win-title"><span>📥</span> Incoming Invite<div class="win-btns"><div class="wbtn" onclick="showMainTab('screen-home','tab-home')">✕</div></div></div>
         <div class="win-body">
-          <div class="invite-card" id="receive-card">
-            <div class="invite-card-stamp pending" id="receive-stamp">PENDING</div>
-            <div class="invite-card-title" id="rec-title">—</div>
-            <div id="rec-details" style="line-height:1.8;"></div>
-          </div>
-          <div id="rsvp-action-area">
-            <div style="font-family:var(--font-main);font-size:18px;margin-bottom:6px;">► YOUR RSVP:</div>
-            <div style="display:flex;gap:8px;margin-bottom:8px;">
-              <button class="btn big" id="rsvp-yes-btn" onclick="doRsvp('yes')" style="flex:1;justify-content:center;">✔ YES</button>
-              <button class="btn big" id="rsvp-no-btn"  onclick="doRsvp('no')"  style="flex:1;justify-content:center;">✘ NO</button>
-            </div>
+          <div class="invite-card"><div class="invite-card-stamp pending" id="receive-stamp">PENDING</div><div class="invite-card-title" id="rec-title">—</div><div id="rec-details" style="line-height:1.8;"></div></div>
+          <div style="font-family:var(--font-main);font-size:18px;margin-bottom:6px;">► YOUR RSVP:</div>
+          <div style="display:flex;gap:8px;margin-bottom:8px;">
+            <button class="btn big" id="rsvp-yes-btn" onclick="doRsvp('yes')" style="flex:1;justify-content:center;">✔ YES</button>
+            <button class="btn big" id="rsvp-no-btn"  onclick="doRsvp('no')"  style="flex:1;justify-content:center;">✘ NO</button>
           </div>
           <button class="btn full" onclick="doAddCalendar()">📅 Add to Calendar (.ics)</button>
         </div>
@@ -1338,15 +1039,13 @@ img,video { max-width:100%; }
       </div>
     </div>
 
-    <!-- ════════════ CALENDAR ════════════ -->
+    <!-- CALENDAR -->
     <div class="screen" id="screen-calendar">
       <div class="win" style="margin-top:8px;">
         <div class="win-title"><span>📅</span> Calendar &amp; Countdown</div>
         <div class="win-body">
           <div style="font-family:var(--font-main);font-size:18px;margin-bottom:6px;">► NEXT EVENT COUNTDOWN:</div>
-          <div id="no-events-msg" style="font-family:var(--font-mono);font-size:11px;color:#888;margin-bottom:8px;">
-            No upcoming events. Send or accept an invite!
-          </div>
+          <div id="no-events-msg" style="font-family:var(--font-mono);font-size:11px;color:#888;margin-bottom:8px;">No upcoming events. Send or accept an invite!</div>
           <div id="countdown-area" style="display:none;">
             <div class="inset" style="font-family:var(--font-main);font-size:18px;margin-bottom:4px;" id="cd-event-name">—</div>
             <div class="countdown-grid">
@@ -1361,79 +1060,46 @@ img,video { max-width:100%; }
           <div class="mini-cal" id="mini-cal"></div>
           <div class="divider"></div>
           <div style="font-family:var(--font-main);font-size:18px;margin-bottom:6px;">► ALL EVENTS:</div>
-          <div id="all-events-list" class="inset" style="max-height:120px;overflow-y:auto;">
-            <span style="font-family:var(--font-mono);font-size:11px;color:#888;">No events yet.</span>
-          </div>
+          <div id="all-events-list" class="inset" style="max-height:120px;overflow-y:auto;"><span style="font-family:var(--font-mono);font-size:11px;color:#888;">No events yet.</span></div>
         </div>
       </div>
     </div>
 
-    <!-- ════════════ TASKBAR ════════════ -->
+    <!-- TASKBAR -->
     <div class="taskbar" id="main-taskbar" style="display:none;">
-      <button class="tab-btn" id="tab-home"     onclick="showMainTab('screen-home','tab-home')">
-        <span class="tab-icon">🌐</span><span class="tab-label">ECO</span>
-      </button>
-      <button class="tab-btn" id="tab-send"     onclick="showMainTab('screen-send','tab-send')">
-        <span class="tab-icon">✉️</span><span class="tab-label">SEND</span>
-      </button>
-      <button class="tab-btn" id="tab-receive"  onclick="showReceiveTab()">
-        <span class="tab-icon">📥</span><span class="tab-label">INBOX</span>
-      </button>
-      <button class="tab-btn" id="tab-calendar" onclick="showMainTab('screen-calendar','tab-calendar')">
-        <span class="tab-icon">📅</span><span class="tab-label">EVENTS</span>
-      </button>
+      <button class="tab-btn" id="tab-home"     onclick="showMainTab('screen-home','tab-home')"><span class="tab-icon">🌐</span><span class="tab-label">ECO</span></button>
+      <button class="tab-btn" id="tab-send"     onclick="showMainTab('screen-send','tab-send')"><span class="tab-icon">✉️</span><span class="tab-label">SEND</span></button>
+      <button class="tab-btn" id="tab-receive"  onclick="showReceiveTab()"><span class="tab-icon">📥</span><span class="tab-label">INBOX</span></button>
+      <button class="tab-btn" id="tab-calendar" onclick="showMainTab('screen-calendar','tab-calendar')"><span class="tab-icon">📅</span><span class="tab-label">EVENTS</span></button>
       <div class="taskbar-clock" id="clock">--:--<br>--/--</div>
     </div>
 
-    <!-- ════════════ POPUP ════════════ -->
+    <!-- POPUP -->
     <div class="popup-overlay" id="popup">
       <div class="popup-win">
-        <div class="win-title">
-          <span id="popup-title-icon">📬</span>
-          <span id="popup-title">Message</span>
-          <div class="win-btns"><div class="wbtn" onclick="closePopup()">✕</div></div>
-        </div>
+        <div class="win-title"><span id="popup-title-icon">📬</span><span id="popup-title">Message</span><div class="win-btns"><div class="wbtn" onclick="closePopup()">✕</div></div></div>
         <div class="popup-body">
           <span class="popup-icon" id="popup-icon">📬</span>
           <div class="popup-msg" id="popup-msg">Hello!</div>
-
-          <div id="popup-loading" style="display:none;">
-            <div class="popup-loading loading-dots">Working</div>
-          </div>
-
+          <div id="popup-loading" style="display:none;"><div class="popup-loading loading-dots">Working</div></div>
           <div id="popup-code-wrap" style="display:none;">
             <div style="font-family:var(--font-mono);font-size:11px;color:#666;margin-bottom:4px;">Your ecosystem code:</div>
             <div class="popup-code" id="popup-code">------</div>
             <div style="font-family:var(--font-mono);font-size:11px;color:#666;margin-bottom:8px;">Share this with friends!</div>
           </div>
-
           <div id="popup-input-wrap" style="display:none;margin-bottom:10px;">
-            <div class="field-row" style="text-align:left;">
-              <label id="popup-input-label">Enter code:</label>
-              <input type="text" id="popup-input" placeholder="" maxlength="8">
-            </div>
+            <div class="field-row" style="text-align:left;"><label id="popup-input-label">Enter code:</label><input type="text" id="popup-input" placeholder="" maxlength="8"></div>
           </div>
-
           <div id="popup-name-input-wrap" style="display:none;margin-bottom:10px;">
-            <div class="field-row" style="text-align:left;">
-              <label>Your name:</label>
-              <input type="text" id="popup-name-input" placeholder="Enter your name..." maxlength="30">
-            </div>
-            <div class="field-row" style="text-align:left;">
-              <label id="popup-eco-name-label">Ecosystem name:</label>
-              <input type="text" id="popup-eco-name-input" placeholder="e.g. The Crew" maxlength="30">
-            </div>
+            <div class="field-row" style="text-align:left;"><label>Your name:</label><input type="text" id="popup-name-input" placeholder="Enter your name..." maxlength="30"></div>
+            <div class="field-row" style="text-align:left;"><label id="popup-eco-name-label">Ecosystem name:</label><input type="text" id="popup-eco-name-input" placeholder="e.g. The Crew" maxlength="30"></div>
           </div>
-
-          <div class="popup-btns" id="popup-btns">
-            <button class="btn" onclick="closePopup()">OK</button>
-          </div>
+          <div class="popup-btns" id="popup-btns"><button class="btn" onclick="closePopup()">OK</button></div>
         </div>
       </div>
     </div>
 
-  </div><!-- phone-screen -->
-</div><!-- phone-shell -->
-
+  </div>
+</div>
 </body>
 </html>
