@@ -17,7 +17,7 @@
      5. Enable Authentication → Anonymous sign-in
      ══════════════════════════════════════════════════════════ -->
 <script>
-  const FIREBASE_CONFIG = {
+  const firebaseConfig = {
     apiKey: "AIzaSyDXdh-UeUhSNZRgMhY1BzwWWNUko0lWV_A",
     authDomain: "ecoinvite-ee332.firebaseapp.com",
     projectId: "ecoinvite-ee332",
@@ -40,7 +40,7 @@ import {
 // ─────────────────────────────────────────
 //  INIT
 // ─────────────────────────────────────────
-const app  = initializeApp(window.FIREBASE_CONFIG);
+const app  = initializeApp(window.firebaseConfig);
 const auth = getAuth(app);
 const db   = getFirestore(app);
 
