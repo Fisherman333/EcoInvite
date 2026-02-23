@@ -763,8 +763,8 @@ body{
   justify-content:center;
 }
 
-/* ── PHONE SHELL ── */
-/* Mobile: fill the screen */
+/* ── SHELL ── */
+/* Mobile: fill the screen edge to edge */
 .phone-shell {
   width:100%;
   height:100vh;
@@ -777,39 +777,40 @@ body{
   padding:0;
 }
 
-/* Desktop (≥900px wide): centered 1/3-width column with phone frame */
+/* Desktop (≥900px): centered rectangular column, no phone chrome */
 @media (min-width:900px) {
   .phone-shell {
-    width:380px;
-    height:min(820px,95vh);
-    height:min(820px,95dvh);
-    background:#1a1a1a;
-    border-radius:50px;
-    padding:14px;
-    box-shadow:0 0 0 2px #333,0 0 0 4px #222,0 40px 80px rgba(0,0,0,.9),inset 0 0 0 1px #444;
+    width:33vw;
+    min-width:340px;
+    max-width:480px;
+    height:min(880px,95vh);
+    height:min(880px,95dvh);
+    background:transparent;
+    border-radius:0;
+    padding:0;
+    box-shadow:0 8px 48px rgba(0,0,0,.7);
   }
 }
 
-/* Tablet (500–899px): small phone shell */
+/* Tablet (500–899px): slightly constrained, still no phone chrome */
 @media (min-width:500px) and (max-width:899px) and (min-height:600px) {
   .phone-shell {
-    width:min(390px,90vw);
-    height:min(820px,95vh);
-    height:min(820px,95dvh);
-    background:#1a1a1a;
-    border-radius:50px;
-    padding:14px;
-    box-shadow:0 0 0 2px #333,0 0 0 4px #222,0 30px 60px rgba(0,0,0,.8),inset 0 0 0 1px #444;
+    width:min(420px,92vw);
+    height:min(880px,95vh);
+    height:min(880px,95dvh);
+    background:transparent;
+    border-radius:0;
+    padding:0;
+    box-shadow:0 8px 40px rgba(0,0,0,.6);
   }
 }
 
-.phone-notch{width:130px;height:30px;background:#1a1a1a;border-radius:0 0 18px 18px;position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:10;display:none;align-items:center;justify-content:center;gap:6px;}
-@media(min-width:500px){.phone-notch{display:flex;}}
-.notch-cam{width:10px;height:10px;background:#2a2a2a;border-radius:50%;border:1px solid #333;}
-.notch-speaker{width:60px;height:5px;background:#2a2a2a;border-radius:3px;}
+/* Notch is never shown — no phone frame on any breakpoint */
+.phone-notch{display:none !important;}
+.notch-cam{display:none;}
+.notch-speaker{display:none;}
 
 .phone-screen{flex:1;background:var(--teal);border-radius:0;overflow:hidden;position:relative;display:flex;flex-direction:column;min-height:0;}
-@media(min-width:500px){.phone-screen{border-radius:36px;}}
 
 .phone-screen::before{content:'';position:absolute;inset:0;pointer-events:none;z-index:0;background-image:url("data:image/svg+xml,%3Csvg width='4' height='4' xmlns='http://www.w3.org/2000/svg'%3E%3Crect x='0' y='0' width='2' height='2' fill='%23008080'/%3E%3Crect x='2' y='2' width='2' height='2' fill='%23008080'/%3E%3Crect x='0' y='2' width='2' height='2' fill='%23007070'/%3E%3Crect x='2' y='0' width='2' height='2' fill='%23007070'/%3E%3C/svg%3E");}
 
