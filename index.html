@@ -8,13 +8,14 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>EcoInvite</title>
+<link href="https://fonts.googleapis.com/css2?family=VT323&family=Share+Tech+Mono&family=Orbitron:wght@700&display=swap" rel="stylesheet">
 
 <script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { initializeApp }                                   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getAuth, signInAnonymously, onAuthStateChanged }  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc,
-  collection, addDoc, onSnapshot, query, where, serverTimestamp
+  collection, addDoc, onSnapshot, query, where, serverTimestamp, writeBatch
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const FIREBASE_CONFIG = {
@@ -31,28 +32,55 @@ const auth = getAuth(app);
 const db   = getFirestore(app);
 
 // ─────────────────────────────────────────
+//  ADMIN — SHA-256 hash of "projecteast"
+//  Generated: crypto.subtle.digest then hex encode
+// ─────────────────────────────────────────
+const ADMIN_USER_HASH = 'c9f2088cd2bc02af19b43d7ef0d6a3e2b1be67c3bb41e5adcf12d4d23c5bba31'; // "admin"
+const ADMIN_PASS_HASH = '4f9b6a4e7e2d1c8b3a5f0e9d2c7b4a6e8f1d3c5b7a9e0f2d4c6b8a0e1f3d5c7'; // "projecteast"
+// NOTE: These are illustrative — real hashes computed at runtime below via subtle crypto
+
+async function sha256(str) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+// Real hashes computed at runtime
+let REAL_USER_HASH = '';
+let REAL_PASS_HASH = '';
+(async () => {
+  REAL_USER_HASH = await sha256('admin');
+  REAL_PASS_HASH = await sha256('projecteast');
+})();
+
+// ─────────────────────────────────────────
 //  STATE
 // ─────────────────────────────────────────
 const state = {
   uid:               null,
   myName:            '',
-  ecoCode:           '',          // active ecosystem
+  ecoCode:           '',
   ecoName:           '',
-  allEcos:           [],          // [{ecoCode, ecoName}] — all ecosystems this user belongs to
+  allEcos:           [],
   members:           [],
   receivedInvites:   [],
   sentInvites:       [],
+  notifications:     [],   // RSVP notifications for sender
   activeInvite:      null,
   selectedRecipient: null,
+  selectedCalEvent:  null, // event selected in calendar for timer
+  cdInterval:        null,
   unsubInvites:      null,
   unsubMembers:      null,
   unsubSent:         null,
+  unsubNotifs:       null,
+  logoTapCount:      0,
+  logoTapTimer:      null,
+  isAdmin:           false,
 };
 
 // ─────────────────────────────────────────
 //  BOOT
 // ─────────────────────────────────────────
-const bootMsgs = ['Initializing EcoInvite v2.0...','Connecting to Firebase...','Authenticating session...','Loading ecosystem data...','Ready.'];
+const bootMsgs = ['Initializing EcoInvite v2.1...','Connecting to Firebase...','Authenticating session...','Loading ecosystem data...','Ready.'];
 let bootIdx = 0;
 const fillEl   = document.getElementById('boot-fill');
 const statusEl = document.getElementById('boot-status');
@@ -70,6 +98,191 @@ function bootStep(msg) {
 })();
 
 // ─────────────────────────────────────────
+//  LOGO TAP — 3x to open admin login
+// ─────────────────────────────────────────
+window.handleLogoTap = function() {
+  state.logoTapCount++;
+  clearTimeout(state.logoTapTimer);
+  if (state.logoTapCount >= 3) {
+    state.logoTapCount = 0;
+    showAdminLogin();
+    return;
+  }
+  state.logoTapTimer = setTimeout(() => { state.logoTapCount = 0; }, 800);
+};
+
+function showAdminLogin() {
+  document.getElementById('admin-login').classList.add('show');
+  document.getElementById('admin-user-input').value  = '';
+  document.getElementById('admin-pass-input').value  = '';
+  document.getElementById('admin-login-msg').textContent = '';
+  document.getElementById('admin-user-input').focus();
+}
+window.closeAdminLogin = function() {
+  document.getElementById('admin-login').classList.remove('show');
+};
+window.submitAdminLogin = async function() {
+  const u = document.getElementById('admin-user-input').value.trim();
+  const p = document.getElementById('admin-pass-input').value;
+  const uh = await sha256(u);
+  const ph = await sha256(p);
+  if (uh === REAL_USER_HASH && ph === REAL_PASS_HASH) {
+    state.isAdmin = true;
+    document.getElementById('admin-login').classList.remove('show');
+    showAdminPanel();
+  } else {
+    document.getElementById('admin-login-msg').textContent = '⚠ Invalid credentials.';
+  }
+};
+// Allow Enter key in admin login
+document.getElementById('admin-pass-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') window.submitAdminLogin();
+});
+
+// ─────────────────────────────────────────
+//  ADMIN PANEL
+// ─────────────────────────────────────────
+async function showAdminPanel() {
+  document.getElementById('admin-panel').classList.add('show');
+  await adminLoadOverview();
+}
+window.closeAdminPanel = function() {
+  document.getElementById('admin-panel').classList.remove('show');
+};
+
+async function adminLoadOverview() {
+  const statusEl = document.getElementById('admin-status');
+  statusEl.textContent = 'Loading...';
+
+  try {
+    // Count ecosystems
+    const ecosSnap  = await getDocs(collection(db, 'ecosystems'));
+    const invSnap   = await getDocs(collection(db, 'invites'));
+    const usersSnap = await getDocs(collection(db, 'users'));
+    const notifsSnap= await getDocs(collection(db, 'notifications'));
+
+    document.getElementById('admin-eco-count').textContent    = ecosSnap.size;
+    document.getElementById('admin-invite-count').textContent = invSnap.size;
+    document.getElementById('admin-user-count').textContent   = usersSnap.size;
+    document.getElementById('admin-notif-count').textContent  = notifsSnap.size;
+    statusEl.textContent = 'Data loaded. ' + new Date().toLocaleTimeString();
+
+    // Render ecosystems list
+    const listEl = document.getElementById('admin-eco-list');
+    listEl.innerHTML = '';
+    for (const ecoDoc of ecosSnap.docs) {
+      const data = ecoDoc.data();
+      const membersSnap = await getDocs(collection(db, 'ecosystems', ecoDoc.id, 'members'));
+      const row = document.createElement('div');
+      row.className = 'admin-row';
+      row.innerHTML = `
+        <div class="admin-row-info">
+          <span class="admin-eco-name">${data.name}</span>
+          <span class="admin-eco-meta">${ecoDoc.id} · ${membersSnap.size} member${membersSnap.size!==1?'s':''}</span>
+        </div>
+        <div class="admin-row-btns">
+          <button class="admin-btn" onclick="adminViewEco('${ecoDoc.id}','${data.name}')">VIEW</button>
+          <button class="admin-btn danger" onclick="adminDeleteEco('${ecoDoc.id}','${data.name}')">DEL</button>
+        </div>`;
+      listEl.appendChild(row);
+    }
+    if (ecosSnap.size === 0) listEl.innerHTML = '<div class="admin-empty">No ecosystems found.</div>';
+
+    // Render invites list
+    const invListEl = document.getElementById('admin-invite-list');
+    invListEl.innerHTML = '';
+    for (const invDoc of invSnap.docs) {
+      const d = invDoc.data();
+      const row = document.createElement('div');
+      row.className = 'admin-row';
+      row.innerHTML = `
+        <div class="admin-row-info">
+          <span class="admin-eco-name">${d.title||'Untitled'}</span>
+          <span class="admin-eco-meta">${d.fromName||'?'} → ${d.toName||'?'} · RSVP: ${(d.rsvp||'?').toUpperCase()} · ${formatDate(d.date)}</span>
+        </div>
+        <div class="admin-row-btns">
+          <button class="admin-btn danger" onclick="adminDeleteInvite('${invDoc.id}','${d.title||''}')">DEL</button>
+        </div>`;
+      invListEl.appendChild(row);
+    }
+    if (invSnap.size === 0) invListEl.innerHTML = '<div class="admin-empty">No invites found.</div>';
+
+  } catch(err) {
+    statusEl.textContent = '❌ ' + err.message;
+  }
+}
+window.adminRefresh = adminLoadOverview;
+
+window.adminViewEco = async function(ecoCode, ecoName) {
+  showPopup({
+    titleIcon:'🌐', title:'Ecosystem: ' + ecoName,
+    icon:'🔍', msg:'Loading members...',
+    btns:[{ label:'Close', cb: closePopup }]
+  });
+  try {
+    const membersSnap = await getDocs(collection(db, 'ecosystems', ecoCode, 'members'));
+    const names = membersSnap.docs.map(d => d.data().name || d.id).join(', ');
+    document.getElementById('popup-msg').textContent = `Code: ${ecoCode}\nMembers (${membersSnap.size}): ${names||'none'}`;
+  } catch(err) {
+    document.getElementById('popup-msg').textContent = '❌ ' + err.message;
+  }
+};
+
+window.adminDeleteEco = async function(ecoCode, ecoName) {
+  if (!confirm(`Delete ecosystem "${ecoName}" (${ecoCode})? This cannot be undone.`)) return;
+  try {
+    const membersSnap = await getDocs(collection(db, 'ecosystems', ecoCode, 'members'));
+    const batch = writeBatch(db);
+    membersSnap.docs.forEach(d => batch.delete(d.ref));
+    batch.delete(doc(db, 'ecosystems', ecoCode));
+    await batch.commit();
+    await adminLoadOverview();
+  } catch(err) { alert('Error: ' + err.message); }
+};
+
+window.adminDeleteInvite = async function(invId, title) {
+  if (!confirm(`Delete invite "${title}"?`)) return;
+  try {
+    await deleteDoc(doc(db, 'invites', invId));
+    await adminLoadOverview();
+  } catch(err) { alert('Error: ' + err.message); }
+};
+
+window.adminClearAll = async function() {
+  if (!confirm('⚠ CLEAR ALL DATA?\n\nThis will delete ALL ecosystems, members, invites and notifications.\n\nThis cannot be undone.')) return;
+  if (!confirm('Are you absolutely sure? Type OK in the next prompt.')) return;
+  const conf = prompt('Type DELETE to confirm:');
+  if (conf !== 'DELETE') { alert('Cancelled.'); return; }
+
+  document.getElementById('admin-status').textContent = 'Clearing all data...';
+  try {
+    const batch = writeBatch(db);
+
+    const ecosSnap = await getDocs(collection(db, 'ecosystems'));
+    for (const ecoDoc of ecosSnap.docs) {
+      const membersSnap = await getDocs(collection(db, 'ecosystems', ecoDoc.id, 'members'));
+      membersSnap.docs.forEach(m => batch.delete(m.ref));
+      batch.delete(ecoDoc.ref);
+    }
+
+    const invSnap = await getDocs(collection(db, 'invites'));
+    invSnap.docs.forEach(d => batch.delete(d.ref));
+
+    const notifSnap = await getDocs(collection(db, 'notifications'));
+    notifSnap.docs.forEach(d => batch.delete(d.ref));
+
+    const usersSnap = await getDocs(collection(db, 'users'));
+    usersSnap.docs.forEach(d => batch.delete(d.ref));
+
+    await batch.commit();
+    document.getElementById('admin-status').textContent = '✅ All data cleared. ' + new Date().toLocaleTimeString();
+    await adminLoadOverview();
+  } catch(err) {
+    document.getElementById('admin-status').textContent = '❌ ' + err.message;
+  }
+};
+
+// ─────────────────────────────────────────
 //  AUTH
 // ─────────────────────────────────────────
 onAuthStateChanged(auth, async (user) => {
@@ -83,15 +296,14 @@ onAuthStateChanged(auth, async (user) => {
   bootStep('Ready.');
   if (fillEl) fillEl.style.width = '100%';
 
-  // Load user profile
   const userDoc = await getDoc(doc(db, 'users', state.uid));
   setTimeout(async () => {
     if (userDoc.exists()) {
-      const data     = userDoc.data();
-      state.myName   = data.name;
-      state.ecoCode  = data.ecoCode  || '';
-      state.ecoName  = data.ecoName  || '';
-      state.allEcos  = data.allEcos  || (state.ecoCode ? [{ ecoCode: state.ecoCode, ecoName: state.ecoName }] : []);
+      const data    = userDoc.data();
+      state.myName  = data.name;
+      state.ecoCode = data.ecoCode  || '';
+      state.ecoName = data.ecoName  || '';
+      state.allEcos = data.allEcos  || (state.ecoCode ? [{ ecoCode: state.ecoCode, ecoName: state.ecoName }] : []);
       if (state.ecoCode) enterApp();
       else showScreen('screen-welcome');
     } else {
@@ -103,111 +315,133 @@ onAuthStateChanged(auth, async (user) => {
 // ─────────────────────────────────────────
 //  HELPERS
 // ─────────────────────────────────────────
-function genCode(len = 6) {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let c = '';
-  for (let i = 0; i < len; i++) c += chars[Math.floor(Math.random() * chars.length)];
-  return c;
+function genCode(len=6) {
+  const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let c=''; for(let i=0;i<len;i++) c+=chars[Math.floor(Math.random()*chars.length)]; return c;
 }
 function formatDate(d) {
   if (!d) return '—';
-  return new Date(d + 'T00:00:00').toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' });
+  return new Date(d+'T00:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+}
+function formatDateShort(d) {
+  if (!d) return '—';
+  return new Date(d+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'});
 }
 function formatTime(t) {
   if (!t) return '—';
-  const [h, m] = t.split(':').map(Number);
-  return `${h % 12 || 12}:${String(m).padStart(2,'0')} ${h >= 12 ? 'PM' : 'AM'}`;
+  const [h,m]=t.split(':').map(Number);
+  return `${h%12||12}:${String(m).padStart(2,'0')} ${h>=12?'PM':'AM'}`;
 }
-function setStatus(id, text) { const el = document.getElementById(id); if (el) el.textContent = text; }
+function setStatus(id,text) { const el=document.getElementById(id); if(el) el.textContent=text; }
+function pad(n) { return String(Math.floor(n)).padStart(2,'0'); }
 
 // ─────────────────────────────────────────
 //  SCREEN NAV
 // ─────────────────────────────────────────
 function showScreen(id) {
-  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  const el = document.getElementById(id);
-  if (el) { el.classList.add('active'); el.scrollTop = 0; }
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  const el=document.getElementById(id);
+  if(el){el.classList.add('active');el.scrollTop=0;}
 }
 function showMainTab(screenId, tabId) {
   showScreen(screenId);
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  const tab = document.getElementById(tabId);
-  if (tab) tab.classList.add('active');
-  if (screenId === 'screen-send')     resetSendForm();
-  if (screenId === 'screen-calendar') refreshCalendar();
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  const tab=document.getElementById(tabId);
+  if(tab) tab.classList.add('active');
+  if(screenId==='screen-calendar') refreshCalendar();
+  if(screenId==='screen-ecos') refreshEcosScreen();
 }
 function showReceiveTab() {
-  const pending = state.receivedInvites.filter(i => i.rsvp === 'pending');
-  if (pending.length > 0) openReceivedInvite(pending[pending.length - 1]);
-  else showPopup({ titleIcon:'📥', title:'Inbox', icon:'✅', msg:'No pending invites right now!', btns:[{label:'OK', cb:closePopup}] });
+  showMainTab('screen-inbox','tab-inbox');
 }
-window.showScreen = showScreen; window.showMainTab = showMainTab; window.showReceiveTab = showReceiveTab;
+window.showScreen=showScreen; window.showMainTab=showMainTab; window.showReceiveTab=showReceiveTab;
 
 // ─────────────────────────────────────────
 //  CLOCK
 // ─────────────────────────────────────────
 function updateClock() {
-  const now = new Date(), h = now.getHours(), m = String(now.getMinutes()).padStart(2,'0');
-  const el = document.getElementById('clock');
-  if (el) el.innerHTML = `${h % 12 || 12}:${m} ${h >= 12 ? 'PM' : 'AM'}<br>${String(now.getMonth()+1).padStart(2,'0')}/${String(now.getDate()).padStart(2,'0')}`;
+  const now=new Date(),h=now.getHours(),m=String(now.getMinutes()).padStart(2,'0');
+  const el=document.getElementById('clock');
+  if(el) el.innerHTML=`${h%12||12}:${m} ${h>=12?'PM':'AM'}<br>${String(now.getMonth()+1).padStart(2,'0')}/${String(now.getDate()).padStart(2,'0')}`;
 }
-updateClock(); setInterval(updateClock, 1000);
+updateClock(); setInterval(updateClock,1000);
 
 // ─────────────────────────────────────────
 //  POPUP
 // ─────────────────────────────────────────
 function showPopup(opts) {
-  document.getElementById('popup-title-icon').textContent = opts.titleIcon || '📬';
-  document.getElementById('popup-title').textContent      = opts.title     || 'Message';
-  document.getElementById('popup-icon').textContent       = opts.icon      || '📬';
-  document.getElementById('popup-msg').textContent        = opts.msg       || '';
-  ['popup-code-wrap','popup-input-wrap','popup-name-input-wrap','popup-loading'].forEach(id => {
-    document.getElementById(id).style.display = 'none';
+  document.getElementById('popup-title-icon').textContent = opts.titleIcon||'📬';
+  document.getElementById('popup-title').textContent      = opts.title    ||'Message';
+  document.getElementById('popup-icon').textContent       = opts.icon     ||'📬';
+  document.getElementById('popup-msg').textContent        = opts.msg      ||'';
+  ['popup-code-wrap','popup-input-wrap','popup-name-input-wrap','popup-loading'].forEach(id=>{
+    document.getElementById(id).style.display='none';
   });
-  if (opts.showCode)  { document.getElementById('popup-code-wrap').style.display = ''; document.getElementById('popup-code').textContent = opts.codeVal || ''; }
-  if (opts.showInput) {
-    document.getElementById('popup-input-wrap').style.display = '';
-    document.getElementById('popup-input-label').textContent  = opts.inputLabel || 'Enter code:';
-    document.getElementById('popup-input').value              = '';
-    document.getElementById('popup-input').placeholder        = opts.inputPlaceholder || '';
-    document.getElementById('popup-input').maxLength          = opts.inputMaxLen || 8;
+  if(opts.showCode)  { document.getElementById('popup-code-wrap').style.display=''; document.getElementById('popup-code').textContent=opts.codeVal||''; }
+  if(opts.showInput) {
+    document.getElementById('popup-input-wrap').style.display='';
+    document.getElementById('popup-input-label').textContent =opts.inputLabel||'Enter code:';
+    document.getElementById('popup-input').value             ='';
+    document.getElementById('popup-input').placeholder       =opts.inputPlaceholder||'';
+    document.getElementById('popup-input').maxLength         =opts.inputMaxLen||8;
   }
-  if (opts.showNameInputs) {
-    document.getElementById('popup-name-input-wrap').style.display = '';
-    document.getElementById('popup-name-input').value               = '';
-    document.getElementById('popup-eco-name-input').value           = '';
-    document.getElementById('popup-eco-name-label').textContent     = opts.secondLabel || 'Ecosystem name:';
-    document.getElementById('popup-eco-name-input').placeholder     = opts.secondPlaceholder || 'e.g. The Crew';
+  if(opts.showNameInputs) {
+    document.getElementById('popup-name-input-wrap').style.display='';
+    document.getElementById('popup-name-input').value='';
+    document.getElementById('popup-eco-name-input').value='';
+    document.getElementById('popup-eco-name-label').textContent    =opts.secondLabel      ||'Ecosystem name:';
+    document.getElementById('popup-eco-name-input').placeholder    =opts.secondPlaceholder||'e.g. The Crew';
   }
-  const btnsEl = document.getElementById('popup-btns');
-  btnsEl.innerHTML = '';
-  (opts.btns || [{label:'OK',cb:null}]).forEach(b => {
-    const el = document.createElement('button');
-    el.className = 'btn'; el.textContent = b.label;
-    el.onclick = () => { if (b.cb) b.cb(); else closePopup(); };
+  const btnsEl=document.getElementById('popup-btns');
+  btnsEl.innerHTML='';
+  (opts.btns||[{label:'OK',cb:null}]).forEach(b=>{
+    const el=document.createElement('button');
+    el.className='btn'; el.textContent=b.label;
+    el.onclick=()=>{ if(b.cb) b.cb(); else closePopup(); };
     btnsEl.appendChild(el);
   });
   document.getElementById('popup').classList.add('show');
 }
 function closePopup() { document.getElementById('popup').classList.remove('show'); }
-function setPopupLoading(on, msg) {
-  document.getElementById('popup-loading').style.display = on ? '' : 'none';
-  document.getElementById('popup-btns').style.display    = on ? 'none' : '';
-  if (msg) document.getElementById('popup-msg').textContent = msg;
+function setPopupLoading(on,msg) {
+  document.getElementById('popup-loading').style.display=on?'':'none';
+  document.getElementById('popup-btns').style.display  =on?'none':'';
+  if(msg) document.getElementById('popup-msg').textContent=msg;
 }
-document.getElementById('popup').addEventListener('click', function(e) { if (e.target === this) closePopup(); });
-window.closePopup = closePopup;
+document.getElementById('popup').addEventListener('click',function(e){ if(e.target===this) closePopup(); });
+window.closePopup=closePopup;
 
 // ─────────────────────────────────────────
-//  SAVE USER PROFILE (helper)
+//  RSVP NOTIFICATION POPUP (for sender)
+// ─────────────────────────────────────────
+function showNotifPopup(notif) {
+  const overlay = document.getElementById('notif-popup');
+  document.getElementById('notif-popup-msg').textContent =
+    `${notif.responderName} said ${notif.rsvp==='yes'?'✅ YES':'❌ NO'} to "${notif.eventTitle}"`;
+  document.getElementById('notif-popup-time').textContent =
+    notif.createdAt?.seconds ? new Date(notif.createdAt.seconds*1000).toLocaleString() : 'Just now';
+  overlay.classList.add('show');
+  overlay._notifId = notif.id;
+}
+window.closeNotifPopup = async function() {
+  const overlay = document.getElementById('notif-popup');
+  const nid = overlay._notifId;
+  overlay.classList.remove('show');
+  if (nid) {
+    try { await updateDoc(doc(db,'notifications',nid),{read:true}); } catch(e){}
+  }
+};
+
+// ─────────────────────────────────────────
+//  SAVE PROFILE
 // ─────────────────────────────────────────
 async function saveUserProfile() {
-  await setDoc(doc(db, 'users', state.uid), {
-    name:     state.myName,
-    ecoCode:  state.ecoCode,
-    ecoName:  state.ecoName,
-    allEcos:  state.allEcos,
-    uid:      state.uid,
+  await setDoc(doc(db,'users',state.uid),{
+    name:    state.myName,
+    ecoCode: state.ecoCode,
+    ecoName: state.ecoName,
+    allEcos: state.allEcos,
+    uid:     state.uid,
   });
 }
 
@@ -217,47 +451,37 @@ async function saveUserProfile() {
 function showCreateEco() {
   showPopup({
     titleIcon:'⊕', title:'Create Ecosystem', icon:'🌐',
-    msg: state.myName ? 'Name your new ecosystem:' : 'Name yourself and your ecosystem:',
-    showNameInputs: true,
-    secondLabel: 'Ecosystem name:', secondPlaceholder: 'e.g. The Crew',
-    btns:[{ label:'CREATE', cb: confirmCreateEco }, { label:'Cancel', cb: closePopup }]
+    msg: state.myName?'Name your new ecosystem:':'Name yourself and your ecosystem:',
+    showNameInputs:true,
+    secondLabel:'Ecosystem name:', secondPlaceholder:'e.g. The Crew',
+    btns:[{label:'CREATE',cb:confirmCreateEco},{label:'Cancel',cb:closePopup}]
   });
-  // If already named, pre-fill
-  if (state.myName) {
-    setTimeout(() => { document.getElementById('popup-name-input').value = state.myName; }, 50);
-  }
+  if(state.myName) setTimeout(()=>{ document.getElementById('popup-name-input').value=state.myName; },50);
 }
-window.showCreateEco = showCreateEco;
+window.showCreateEco=showCreateEco;
 
 async function confirmCreateEco() {
   const name    = document.getElementById('popup-name-input').value.trim();
   const ecoName = document.getElementById('popup-eco-name-input').value.trim();
-  if (!name || !ecoName) { document.getElementById('popup-msg').textContent = '⚠ Please fill in both fields!'; return; }
-  setPopupLoading(true, 'Creating your ecosystem...');
-  const ecoCode = genCode(6);
+  if(!name||!ecoName){ document.getElementById('popup-msg').textContent='⚠ Please fill in both fields!'; return; }
+  setPopupLoading(true,'Creating your ecosystem...');
+  const ecoCode=genCode(6);
   try {
-    await setDoc(doc(db, 'ecosystems', ecoCode), { name: ecoName, createdBy: state.uid, createdAt: serverTimestamp() });
-    await setDoc(doc(db, 'ecosystems', ecoCode, 'members', state.uid), { name, uid: state.uid, joinedAt: serverTimestamp() });
-
-    state.myName  = name;
-    // Set as active eco and add to allEcos list
-    state.ecoCode = ecoCode;
-    state.ecoName = ecoName;
-    if (!state.allEcos.find(e => e.ecoCode === ecoCode)) {
-      state.allEcos.push({ ecoCode, ecoName });
-    }
+    await setDoc(doc(db,'ecosystems',ecoCode),{name:ecoName,createdBy:state.uid,createdAt:serverTimestamp()});
+    await setDoc(doc(db,'ecosystems',ecoCode,'members',state.uid),{name,uid:state.uid,joinedAt:serverTimestamp()});
+    state.myName=name; state.ecoCode=ecoCode; state.ecoName=ecoName;
+    if(!state.allEcos.find(e=>e.ecoCode===ecoCode)) state.allEcos.push({ecoCode,ecoName});
     await saveUserProfile();
-
     setPopupLoading(false);
-    document.getElementById('popup-msg').textContent               = `"${ecoName}" is live! Share your code:`;
-    document.getElementById('popup-code-wrap').style.display       = '';
-    document.getElementById('popup-code').textContent              = ecoCode;
-    document.getElementById('popup-name-input-wrap').style.display = 'none';
-    document.getElementById('popup-btns').innerHTML                = '';
-    const btn = document.createElement('button'); btn.className = 'btn'; btn.textContent = "LET'S GO!";
-    btn.onclick = () => { closePopup(); enterApp(); };
+    document.getElementById('popup-msg').textContent=`"${ecoName}" is live! Share your code:`;
+    document.getElementById('popup-code-wrap').style.display='';
+    document.getElementById('popup-code').textContent=ecoCode;
+    document.getElementById('popup-name-input-wrap').style.display='none';
+    document.getElementById('popup-btns').innerHTML='';
+    const btn=document.createElement('button'); btn.className='btn'; btn.textContent="LET'S GO!";
+    btn.onclick=()=>{ closePopup(); enterApp(); };
     document.getElementById('popup-btns').appendChild(btn);
-  } catch(err) { setPopupLoading(false); document.getElementById('popup-msg').textContent = '❌ Error: ' + err.message; }
+  } catch(err){ setPopupLoading(false); document.getElementById('popup-msg').textContent='❌ '+err.message; }
 }
 
 // ─────────────────────────────────────────
@@ -266,196 +490,94 @@ async function confirmCreateEco() {
 function showJoinEco() {
   showPopup({
     titleIcon:'►', title:'Join Ecosystem', icon:'🔑',
-    msg: state.myName ? "Enter a friend's ecosystem code:" : "Enter your name and a friend's ecosystem code:",
-    showNameInputs: true,
-    secondLabel: "Friend's ecosystem code:", secondPlaceholder: 'e.g. XK7P2M',
-    btns:[{ label:'JOIN', cb: confirmJoinEco }, { label:'Cancel', cb: closePopup }]
+    msg:state.myName?"Enter a friend's ecosystem code:":"Enter your name and a friend's ecosystem code:",
+    showNameInputs:true,
+    secondLabel:"Friend's ecosystem code:", secondPlaceholder:'e.g. XK7P2M',
+    btns:[{label:'JOIN',cb:confirmJoinEco},{label:'Cancel',cb:closePopup}]
   });
-  setTimeout(() => {
-    if (state.myName) document.getElementById('popup-name-input').value = state.myName;
-    const inp = document.getElementById('popup-eco-name-input');
-    inp.maxLength = 6; inp.style.textTransform = 'uppercase';
-  }, 50);
+  setTimeout(()=>{
+    if(state.myName) document.getElementById('popup-name-input').value=state.myName;
+    const inp=document.getElementById('popup-eco-name-input');
+    inp.maxLength=6; inp.style.textTransform='uppercase';
+  },50);
 }
-window.showJoinEco = showJoinEco;
+window.showJoinEco=showJoinEco;
 
 async function confirmJoinEco() {
-  const name = document.getElementById('popup-name-input').value.trim();
-  const code = document.getElementById('popup-eco-name-input').value.trim().toUpperCase();
-  if (!name || code.length < 4) { document.getElementById('popup-msg').textContent = '⚠ Please fill in both fields!'; return; }
-  if (state.allEcos.find(e => e.ecoCode === code)) { document.getElementById('popup-msg').textContent = "⚠ You're already in that ecosystem!"; return; }
-  setPopupLoading(true, 'Looking up ecosystem...');
+  const name=document.getElementById('popup-name-input').value.trim();
+  const code=document.getElementById('popup-eco-name-input').value.trim().toUpperCase();
+  if(!name||code.length<4){ document.getElementById('popup-msg').textContent='⚠ Please fill in both fields!'; return; }
+  if(state.allEcos.find(e=>e.ecoCode===code)){ document.getElementById('popup-msg').textContent="⚠ You're already in that ecosystem!"; return; }
+  setPopupLoading(true,'Looking up ecosystem...');
   try {
-    const ecoSnap = await getDoc(doc(db, 'ecosystems', code));
-    if (!ecoSnap.exists()) { setPopupLoading(false); document.getElementById('popup-msg').textContent = '❌ Ecosystem not found. Check the code!'; return; }
-    const ecoData = ecoSnap.data();
-    await setDoc(doc(db, 'ecosystems', code, 'members', state.uid), { name, uid: state.uid, joinedAt: serverTimestamp() });
-
-    state.myName = name;
-    // Switch active eco to the newly joined one
-    state.ecoCode = code;
-    state.ecoName = ecoData.name;
-    if (!state.allEcos.find(e => e.ecoCode === code)) {
-      state.allEcos.push({ ecoCode: code, ecoName: ecoData.name });
-    }
+    const ecoSnap=await getDoc(doc(db,'ecosystems',code));
+    if(!ecoSnap.exists()){ setPopupLoading(false); document.getElementById('popup-msg').textContent='❌ Ecosystem not found.'; return; }
+    const ecoData=ecoSnap.data();
+    await setDoc(doc(db,'ecosystems',code,'members',state.uid),{name,uid:state.uid,joinedAt:serverTimestamp()});
+    state.myName=name; state.ecoCode=code; state.ecoName=ecoData.name;
+    if(!state.allEcos.find(e=>e.ecoCode===code)) state.allEcos.push({ecoCode:code,ecoName:ecoData.name});
     await saveUserProfile();
-
     setPopupLoading(false);
-    document.getElementById('popup-msg').textContent               = `Welcome, ${name}! You joined "${ecoData.name}"!`;
-    document.getElementById('popup-name-input-wrap').style.display = 'none';
-    document.getElementById('popup-btns').innerHTML                = '';
-    const btn = document.createElement('button'); btn.className = 'btn'; btn.textContent = "LET'S GO!";
-    btn.onclick = () => { closePopup(); enterApp(); };
+    document.getElementById('popup-msg').textContent=`Welcome, ${name}! Joined "${ecoData.name}"!`;
+    document.getElementById('popup-name-input-wrap').style.display='none';
+    document.getElementById('popup-btns').innerHTML='';
+    const btn=document.createElement('button'); btn.className='btn'; btn.textContent="LET'S GO!";
+    btn.onclick=()=>{ closePopup(); enterApp(); };
     document.getElementById('popup-btns').appendChild(btn);
-  } catch(err) { setPopupLoading(false); document.getElementById('popup-msg').textContent = '❌ Error: ' + err.message; }
+  } catch(err){ setPopupLoading(false); document.getElementById('popup-msg').textContent='❌ '+err.message; }
 }
-
-// ─────────────────────────────────────────
-//  SWITCH ECOSYSTEM
-// ─────────────────────────────────────────
-function showSwitchEco() {
-  if (state.allEcos.length <= 1) {
-    showPopup({
-      titleIcon:'🌐', title:'My Ecosystems', icon:'💡',
-      msg:"You're only in one ecosystem. Join or create another to switch!",
-      btns:[
-        { label:'+ CREATE', cb: () => { closePopup(); showCreateEco(); }},
-        { label:'► JOIN',   cb: () => { closePopup(); showJoinEco(); }},
-        { label:'Cancel',   cb: closePopup },
-      ]
-    });
-    return;
-  }
-  const btnsEl = document.getElementById('popup-btns');
-  showPopup({
-    titleIcon:'🌐', title:'Switch Ecosystem', icon:'🔀',
-    msg: 'Select an ecosystem to switch to:',
-    btns: []
-  });
-  // Build ecosystem buttons dynamically
-  btnsEl.innerHTML = '';
-  state.allEcos.forEach(eco => {
-    const btn = document.createElement('button');
-    btn.className = 'btn full' + (eco.ecoCode === state.ecoCode ? ' green-sel' : '');
-    btn.style.marginBottom = '4px';
-    btn.textContent = (eco.ecoCode === state.ecoCode ? '✔ ' : '') + eco.ecoName + ' (' + eco.ecoCode + ')';
-    btn.onclick = () => {
-      if (eco.ecoCode !== state.ecoCode) {
-        state.ecoCode = eco.ecoCode;
-        state.ecoName = eco.ecoName;
-        saveUserProfile();
-        closePopup();
-        enterApp();
-      } else {
-        closePopup();
-      }
-    };
-    btnsEl.appendChild(btn);
-  });
-  // Add/leave options
-  const sep = document.createElement('div');
-  sep.style.cssText = 'height:1px;background:var(--shadow);margin:6px 0;';
-  btnsEl.appendChild(sep);
-  const createBtn = document.createElement('button');
-  createBtn.className = 'btn full'; createBtn.textContent = '⊕ Create New Ecosystem';
-  createBtn.onclick = () => { closePopup(); showCreateEco(); };
-  btnsEl.appendChild(createBtn);
-  const joinBtn = document.createElement('button');
-  joinBtn.className = 'btn full'; joinBtn.textContent = '► Join Another Ecosystem';
-  joinBtn.onclick = () => { closePopup(); showJoinEco(); };
-  btnsEl.appendChild(joinBtn);
-}
-window.showSwitchEco = showSwitchEco;
 
 // ─────────────────────────────────────────
 //  LEAVE ECOSYSTEM
 // ─────────────────────────────────────────
-function showLeaveEco() {
-  showPopup({
-    titleIcon:'🚪', title:'Leave Ecosystem', icon:'⚠️',
-    msg: `Leave "${state.ecoName}" (${state.ecoCode})? You won't receive invites from this group anymore.`,
-    btns:[
-      { label:'LEAVE', cb: confirmLeaveEco },
-      { label:'Cancel', cb: closePopup },
-    ]
-  });
-}
-window.showLeaveEco = showLeaveEco;
-
-async function confirmLeaveEco() {
-  setPopupLoading(true, 'Leaving ecosystem...');
+async function confirmLeaveEco(ecoCode, ecoName) {
+  if(!confirm(`Leave "${ecoName}"?`)) return;
   try {
-    // Remove from members subcollection
-    await deleteDoc(doc(db, 'ecosystems', state.ecoCode, 'members', state.uid));
-
-    // Remove from allEcos
-    state.allEcos = state.allEcos.filter(e => e.ecoCode !== state.ecoCode);
-
-    // Switch to another eco if available
-    if (state.allEcos.length > 0) {
-      state.ecoCode = state.allEcos[0].ecoCode;
-      state.ecoName = state.allEcos[0].ecoName;
-    } else {
-      state.ecoCode = '';
-      state.ecoName = '';
+    await deleteDoc(doc(db,'ecosystems',ecoCode,'members',state.uid));
+    state.allEcos=state.allEcos.filter(e=>e.ecoCode!==ecoCode);
+    if(state.ecoCode===ecoCode) {
+      state.ecoCode=state.allEcos.length>0?state.allEcos[0].ecoCode:'';
+      state.ecoName=state.allEcos.length>0?state.allEcos[0].ecoName:'';
     }
     await saveUserProfile();
-
-    setPopupLoading(false);
-    closePopup();
     teardownListeners();
-    if (state.ecoCode) {
-      enterApp();
-    } else {
-      document.getElementById('main-taskbar').style.display = 'none';
-      showScreen('screen-welcome');
-    }
-  } catch(err) { setPopupLoading(false); document.getElementById('popup-msg').textContent = '❌ Error: ' + err.message; }
+    if(state.ecoCode) enterApp();
+    else { document.getElementById('main-taskbar').style.display='none'; showScreen('screen-welcome'); }
+    refreshEcosScreen();
+  } catch(err){ alert('Error: '+err.message); }
 }
 
 // ─────────────────────────────────────────
-//  ENTER APP — real-time listeners
+//  ECOSYSTEMS SCREEN
 // ─────────────────────────────────────────
-function teardownListeners() {
-  if (state.unsubMembers) { state.unsubMembers(); state.unsubMembers = null; }
-  if (state.unsubInvites) { state.unsubInvites(); state.unsubInvites = null; }
-  if (state.unsubSent)    { state.unsubSent();    state.unsubSent    = null; }
+function refreshEcosScreen() {
+  const listEl=document.getElementById('ecos-list');
+  listEl.innerHTML='';
+  state.allEcos.forEach(eco=>{
+    const card=document.createElement('div');
+    const isActive=eco.ecoCode===state.ecoCode;
+    card.className='eco-card'+(isActive?' active':'');
+    card.innerHTML=`
+      <div class="eco-card-body">
+        <div class="eco-card-name">${isActive?'✔ ':''} ${eco.ecoName}</div>
+        <div class="eco-card-code">${eco.ecoCode}</div>
+      </div>
+      <div class="eco-card-btns">
+        ${!isActive?`<button class="btn" onclick="switchToEco('${eco.ecoCode}','${eco.ecoName}')">SWITCH</button>`:'<span class="eco-active-badge">ACTIVE</span>'}
+        <button class="btn danger" onclick="confirmLeaveEco('${eco.ecoCode}','${eco.ecoName}')">LEAVE</button>
+      </div>`;
+    listEl.appendChild(card);
+  });
+  if(state.allEcos.length===0) listEl.innerHTML='<div style="font-family:var(--font-mono);font-size:11px;color:#888;padding:8px;">No ecosystems yet.</div>';
 }
+window.confirmLeaveEco=confirmLeaveEco;
 
-function enterApp() {
-  teardownListeners();
-  document.getElementById('main-taskbar').style.display = 'flex';
-  showScreen('screen-home');
-  document.getElementById('tab-home').classList.add('active');
-
-  // Members
-  state.unsubMembers = onSnapshot(
-    collection(db, 'ecosystems', state.ecoCode, 'members'),
-    snap => {
-      state.members = snap.docs.map(d => d.data()).filter(m => m.uid !== state.uid);
-      refreshHomeScreen();
-    }
-  );
-
-  // Received invites (to me, in this eco) — all RSVP states for calendar, but inbox shows only pending
-  state.unsubInvites = onSnapshot(
-    query(collection(db, 'invites'), where('toUid','==',state.uid), where('ecoCode','==',state.ecoCode)),
-    snap => {
-      state.receivedInvites = snap.docs.map(d => ({ id:d.id, ...d.data() }));
-      refreshHomeScreen();
-      const pending = state.receivedInvites.filter(i => i.rsvp === 'pending').length;
-      const tabEl = document.getElementById('tab-receive');
-      if (tabEl) tabEl.querySelector('.tab-label').textContent = pending > 0 ? `INBOX(${pending})` : 'INBOX';
-    }
-  );
-
-  // Sent invites (from me) — for calendar
-  state.unsubSent = onSnapshot(
-    query(collection(db, 'invites'), where('fromUid','==',state.uid), where('ecoCode','==',state.ecoCode)),
-    snap => { state.sentInvites = snap.docs.map(d => ({ id:d.id, ...d.data() })); }
-  );
-}
-window.enterApp = enterApp;
+window.switchToEco=function(ecoCode,ecoName) {
+  state.ecoCode=ecoCode; state.ecoName=ecoName;
+  saveUserProfile();
+  enterApp();
+  showMainTab('screen-home','tab-home');
+};
 
 // ─────────────────────────────────────────
 //  SHARE CODE
@@ -463,15 +585,15 @@ window.enterApp = enterApp;
 function showInviteCode() {
   showPopup({
     titleIcon:'📋', title:'Ecosystem Code', icon:'🌐',
-    msg:`Share this code so friends can join "${state.ecoName}":`,
-    showCode: true, codeVal: state.ecoCode,
+    msg:`Share this so friends can join "${state.ecoName}":`,
+    showCode:true, codeVal:state.ecoCode,
     btns:[
-      { label:'📋 Copy', cb: () => { navigator.clipboard?.writeText(state.ecoCode); document.getElementById('popup-msg').textContent = '✅ Copied!'; }},
-      { label:'Close', cb: closePopup },
+      {label:'📋 Copy',cb:()=>{ navigator.clipboard?.writeText(state.ecoCode); document.getElementById('popup-msg').textContent='✅ Copied!'; }},
+      {label:'Close',cb:closePopup}
     ]
   });
 }
-window.showInviteCode = showInviteCode;
+window.showInviteCode=showInviteCode;
 
 // ─────────────────────────────────────────
 //  ADD MEMBER
@@ -479,405 +601,558 @@ window.showInviteCode = showInviteCode;
 function showAddMember() {
   showPopup({
     titleIcon:'➕', title:'Add Member', icon:'👤',
-    msg:"Enter a friend's ecosystem code to connect:",
-    showInput: true, inputLabel:"Friend's Code:", inputPlaceholder:'e.g. XK7P2M', inputMaxLen:6,
-    btns:[{ label:'ADD', cb: confirmAddMember }, { label:'Cancel', cb: closePopup }]
+    msg:"Enter a friend's ecosystem code:",
+    showInput:true, inputLabel:"Friend's Code:", inputPlaceholder:'e.g. XK7P2M', inputMaxLen:6,
+    btns:[{label:'ADD',cb:confirmAddMember},{label:'Cancel',cb:closePopup}]
   });
-  setTimeout(() => { document.getElementById('popup-input').style.textTransform = 'uppercase'; }, 50);
+  setTimeout(()=>{ document.getElementById('popup-input').style.textTransform='uppercase'; },50);
 }
-window.showAddMember = showAddMember;
+window.showAddMember=showAddMember;
 
 async function confirmAddMember() {
-  const code = document.getElementById('popup-input').value.trim().toUpperCase();
-  if (code.length < 4) { document.getElementById('popup-msg').textContent = '⚠ Please enter a valid code.'; return; }
-  if (code === state.ecoCode) { document.getElementById('popup-msg').textContent = "⚠ That's your own code!"; return; }
-  setPopupLoading(true, 'Looking up ecosystem...');
+  const code=document.getElementById('popup-input').value.trim().toUpperCase();
+  if(code.length<4){ document.getElementById('popup-msg').textContent='⚠ Please enter a valid code.'; return; }
+  if(code===state.ecoCode){ document.getElementById('popup-msg').textContent="⚠ That's your own code!"; return; }
+  setPopupLoading(true,'Looking up ecosystem...');
   try {
-    const ecoSnap = await getDoc(doc(db, 'ecosystems', code));
-    if (!ecoSnap.exists()) { setPopupLoading(false); document.getElementById('popup-msg').textContent = '❌ Ecosystem not found.'; return; }
-    await setDoc(doc(db, 'ecosystems', code, 'members', state.uid), { name: state.myName, uid: state.uid, joinedAt: serverTimestamp() });
-    const ecoData = ecoSnap.data();
+    const ecoSnap=await getDoc(doc(db,'ecosystems',code));
+    if(!ecoSnap.exists()){ setPopupLoading(false); document.getElementById('popup-msg').textContent='❌ Ecosystem not found.'; return; }
+    await setDoc(doc(db,'ecosystems',code,'members',state.uid),{name:state.myName,uid:state.uid,joinedAt:serverTimestamp()});
     setPopupLoading(false);
-    document.getElementById('popup-msg').textContent = `✅ You joined "${ecoData.name}"! They can now send you invites.`;
-    document.getElementById('popup-btns').innerHTML  = '';
-    const btn = document.createElement('button'); btn.className = 'btn'; btn.textContent = 'GREAT!'; btn.onclick = closePopup;
+    document.getElementById('popup-msg').textContent=`✅ Connected to "${ecoSnap.data().name}"!`;
+    document.getElementById('popup-btns').innerHTML='';
+    const btn=document.createElement('button'); btn.className='btn'; btn.textContent='GREAT!'; btn.onclick=closePopup;
     document.getElementById('popup-btns').appendChild(btn);
-  } catch(err) { setPopupLoading(false); document.getElementById('popup-msg').textContent = '❌ Error: ' + err.message; }
+  } catch(err){ setPopupLoading(false); document.getElementById('popup-msg').textContent='❌ '+err.message; }
 }
 
 // ─────────────────────────────────────────
-//  REFRESH HOME SCREEN
+//  ENTER APP — listeners
+// ─────────────────────────────────────────
+function teardownListeners() {
+  if(state.unsubMembers){ state.unsubMembers(); state.unsubMembers=null; }
+  if(state.unsubInvites){ state.unsubInvites(); state.unsubInvites=null; }
+  if(state.unsubSent)   { state.unsubSent();    state.unsubSent=null; }
+  if(state.unsubNotifs) { state.unsubNotifs();  state.unsubNotifs=null; }
+}
+
+function enterApp() {
+  teardownListeners();
+  document.getElementById('main-taskbar').style.display='flex';
+  showScreen('screen-home');
+  document.getElementById('tab-home').classList.add('active');
+
+  // Members
+  state.unsubMembers=onSnapshot(collection(db,'ecosystems',state.ecoCode,'members'),snap=>{
+    state.members=snap.docs.map(d=>d.data()).filter(m=>m.uid!==state.uid);
+    refreshHomeScreen();
+  });
+
+  // Received invites (all — inbox shows all, calendar filters)
+  state.unsubInvites=onSnapshot(
+    query(collection(db,'invites'),where('toUid','==',state.uid),where('ecoCode','==',state.ecoCode)),
+    snap=>{
+      state.receivedInvites=snap.docs.map(d=>({id:d.id,...d.data()}));
+      refreshHomeScreen();
+      refreshInboxScreen();
+      const pending=state.receivedInvites.filter(i=>i.rsvp==='pending').length;
+      const tabEl=document.getElementById('tab-inbox');
+      if(tabEl) tabEl.querySelector('.tab-label').textContent=pending>0?`INBOX(${pending})`:'INBOX';
+    }
+  );
+
+  // Sent invites
+  state.unsubSent=onSnapshot(
+    query(collection(db,'invites'),where('fromUid','==',state.uid),where('ecoCode','==',state.ecoCode)),
+    snap=>{ state.sentInvites=snap.docs.map(d=>({id:d.id,...d.data()})); }
+  );
+
+  // Notifications (RSVP responses sent to me as the inviter)
+  state.unsubNotifs=onSnapshot(
+    query(collection(db,'notifications'),where('recipientUid','==',state.uid),where('read','==',false)),
+    snap=>{
+      state.notifications=snap.docs.map(d=>({id:d.id,...d.data()}));
+      refreshHomeScreen();
+      // Badge
+      const tabEl=document.getElementById('tab-home');
+      if(tabEl) {
+        const notifCount=state.notifications.length;
+        const pendingCount=state.receivedInvites.filter(i=>i.rsvp==='pending').length;
+        const total=notifCount+pendingCount;
+        tabEl.querySelector('.tab-label').textContent=total>0?`ECO(${total})`:'ECO';
+      }
+    }
+  );
+}
+window.enterApp=enterApp;
+
+// ─────────────────────────────────────────
+//  HOME SCREEN
 // ─────────────────────────────────────────
 function refreshHomeScreen() {
-  document.getElementById('eco-name-display').textContent      = state.ecoName || 'My Eco';
-  document.getElementById('home-eco-code-display').textContent = 'ECO: ' + (state.ecoCode || '------');
-  document.getElementById('home-member-count').textContent     = (state.members.length + 1) + ' member' + (state.members.length !== 0 ? 's' : '');
-  document.getElementById('eco-count-badge').textContent       = state.allEcos.length > 1 ? `${state.allEcos.length} ecosystems` : '1 ecosystem';
+  document.getElementById('eco-name-display').textContent      = state.ecoName||'My Eco';
+  document.getElementById('home-eco-code-display').textContent = 'ECO: '+(state.ecoCode||'------');
+  document.getElementById('home-member-count').textContent     = (state.members.length+1)+' member'+(state.members.length!==0?'s':'');
 
   // Members list
-  document.getElementById('member-list-home').innerHTML =
-    [{ name: state.myName + ' (you)' }].concat(state.members).map(m =>
+  document.getElementById('member-list-home').innerHTML=
+    [{name:state.myName+' (you)'}].concat(state.members).map(m=>
       `<div class="member-item"><div class="member-dot"></div><span>${m.name}</span></div>`
     ).join('');
 
-  // Inbox — PENDING ONLY
-  const pending = state.receivedInvites.filter(i => i.rsvp === 'pending');
-  const incomingEl = document.getElementById('incoming-invites-list');
-  if (pending.length === 0) {
-    incomingEl.innerHTML = `<div style="font-family:var(--font-mono);font-size:12px;color:#888;text-align:center;padding:8px;">No pending invites.</div>`;
+  // Notifications box — pending invites + RSVP notifications
+  const pending=state.receivedInvites.filter(i=>i.rsvp==='pending');
+  const notifEl=document.getElementById('notifications-list');
+  const rows=[];
+
+  // Unread RSVP notifications (for me as sender)
+  state.notifications.forEach(n=>{
+    rows.push(`<div class="notif-item notif-rsvp" onclick="openNotifById('${n.id}')">
+      <span class="notif-icon">${n.rsvp==='yes'?'✅':'❌'}</span>
+      <span class="notif-text">${n.responderName} said ${n.rsvp==='yes'?'YES':'NO'} to <em>${n.eventTitle}</em></span>
+    </div>`);
+  });
+
+  // Pending invites for me
+  pending.forEach(inv=>{
+    rows.push(`<div class="notif-item notif-pending" onclick="openInviteById('${inv.id}')">
+      <span class="notif-icon">🔴</span>
+      <span class="notif-text">Invite from <em>${inv.fromName}</em>: ${inv.title}</span>
+    </div>`);
+  });
+
+  if(rows.length===0) {
+    notifEl.innerHTML='<div style="font-family:var(--font-mono);font-size:11px;color:#888;text-align:center;padding:6px;">No notifications.</div>';
   } else {
-    incomingEl.innerHTML = [...pending]
-      .sort((a,b) => (b.createdAt?.seconds||0) - (a.createdAt?.seconds||0))
-      .map(inv => `
-        <div onclick="openInviteById('${inv.id}')" style="background:var(--lt-yellow);border-bottom:1px solid var(--mid);padding:6px 8px;cursor:pointer;">
-          <div style="font-family:var(--font-main);font-size:18px;">🔴 ${inv.title}</div>
-          <div style="font-family:var(--font-mono);font-size:10px;color:#555;">FROM: ${inv.fromName} · ${formatDate(inv.date)}</div>
-        </div>`
-      ).join('');
+    notifEl.innerHTML=rows.join('');
   }
 
   // Ticker
-  const names = state.members.map(m => m.name).join(' ★ ') || 'Share your code!';
-  document.getElementById('home-ticker').textContent = `★ ${state.ecoName.toUpperCase()} ★ ${names.toUpperCase()} ★ CODE: ${state.ecoCode} ★ `;
+  const names=state.members.map(m=>m.name).join(' ★ ')||'Share your code!';
+  document.getElementById('home-ticker').textContent=`★ ${state.ecoName.toUpperCase()} ★ ${names.toUpperCase()} ★ CODE: ${state.ecoCode} ★ `;
 }
 
+window.openNotifById=function(id) {
+  const n=state.notifications.find(n=>n.id===id);
+  if(n) showNotifPopup(n);
+};
 function openInviteById(id) {
-  const inv = state.receivedInvites.find(i => i.id === id);
-  if (inv) openReceivedInvite(inv);
+  const inv=state.receivedInvites.find(i=>i.id===id);
+  if(inv) openReceivedInvite(inv);
 }
-window.openInviteById = openInviteById;
+window.openInviteById=openInviteById;
+
+// ─────────────────────────────────────────
+//  INBOX SCREEN — all invites + ▲▼
+// ─────────────────────────────────────────
+function refreshInboxScreen() {
+  const listEl=document.getElementById('inbox-list');
+  const all=[...state.receivedInvites].sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+  if(all.length===0) {
+    listEl.innerHTML='<div style="font-family:var(--font-mono);font-size:11px;color:#888;text-align:center;padding:12px;">No invites yet.</div>';
+    return;
+  }
+  listEl.innerHTML=all.map(inv=>{
+    let arrow='', arrowColor='#888';
+    if(inv.rsvp==='yes')   { arrow='▲'; arrowColor='var(--green)'; }
+    else if(inv.rsvp==='no'){ arrow='▼'; arrowColor='var(--red)'; }
+    else { arrow='●'; arrowColor='#aaa'; }
+    const bg=inv.rsvp==='pending'?'var(--lt-yellow)':inv.rsvp==='yes'?'var(--lt-green)':'var(--lt-red)';
+    return `<div class="inbox-row" onclick="openInviteById('${inv.id}')" style="background:${bg};">
+      <div class="inbox-row-main">
+        <span class="inbox-title">${inv.title}</span>
+        <span class="inbox-date">${formatDateShort(inv.date)}</span>
+      </div>
+      <span class="inbox-arrow" style="color:${arrowColor};">${arrow}</span>
+    </div>`;
+  }).join('');
+}
 
 // ─────────────────────────────────────────
 //  SEND INVITE
 // ─────────────────────────────────────────
-function goToSendInvite() { resetSendForm(); showScreen('screen-send'); document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active')); document.getElementById('tab-send').classList.add('active'); }
-window.goToSendInvite = goToSendInvite;
+function goToSendInvite() {
+  resetSendForm();
+  showScreen('screen-send');
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+}
+window.goToSendInvite=goToSendInvite;
 
 function resetSendForm() {
-  state.selectedRecipient = null;
-  document.getElementById('selected-recipient-name').textContent = '—';
-  ['inv-title','inv-date','inv-time','inv-location','inv-details'].forEach(id => { document.getElementById(id).value = ''; });
+  state.selectedRecipient=null;
+  document.getElementById('selected-recipient-name').textContent='—';
+  ['inv-title','inv-date','inv-time','inv-location','inv-details'].forEach(id=>{
+    document.getElementById(id).value='';
+  });
   sendStep(1);
-  const cp = document.getElementById('contact-picker');
-  if (state.members.length === 0) {
-    cp.innerHTML = `<div style="font-family:var(--font-mono);font-size:11px;color:#888;padding:4px;">No members yet. Add members first!</div>`;
+  const cp=document.getElementById('contact-picker');
+  if(state.members.length===0) {
+    cp.innerHTML='<div style="font-family:var(--font-mono);font-size:11px;color:#888;padding:4px;">No members yet. Add members first!</div>';
   } else {
-    cp.innerHTML = state.members.map(m =>
+    cp.innerHTML=state.members.map(m=>
       `<div class="contact-item" id="contact-${m.uid}" onclick="selectContact('${m.name}','${m.uid}')"><div class="member-dot"></div>${m.name}</div>`
     ).join('');
   }
 }
-function selectContact(name, uid) {
-  state.selectedRecipient = { name, uid };
-  document.getElementById('selected-recipient-name').textContent = name;
-  document.querySelectorAll('.contact-item').forEach(el => el.classList.remove('selected-contact'));
-  const el = document.getElementById('contact-' + uid); if (el) el.classList.add('selected-contact');
+
+function selectContact(name,uid) {
+  state.selectedRecipient={name,uid};
+  document.getElementById('selected-recipient-name').textContent=name;
+  document.querySelectorAll('.contact-item').forEach(el=>el.classList.remove('selected-contact'));
+  const el=document.getElementById('contact-'+uid); if(el) el.classList.add('selected-contact');
 }
-window.selectContact = selectContact;
+window.selectContact=selectContact;
 
 function sendStep(n) {
-  [1,2,3].forEach(i => { document.getElementById('send-step-' + i).style.display = (i === n) ? '' : 'none'; });
-  ['dot1','dot2','dot3'].forEach((id,i) => { document.getElementById(id).className = 'step-dot' + (i+1 < n ? ' done' : i+1 === n ? ' current' : ''); });
-  if (n === 2) { if (!state.selectedRecipient) { sendStep(1); setStatus('send-status','⚠ Select a recipient first!'); return; } setStatus('send-status','Fill in your event details.'); }
-  if (n === 3) {
-    const title = document.getElementById('inv-title').value.trim(), date = document.getElementById('inv-date').value;
-    if (!title || !date) { sendStep(2); setStatus('send-status','⚠ Title and date required!'); return; }
-    document.getElementById('prev-title').textContent = title;
-    document.getElementById('prev-details').innerHTML = `<strong>TO:</strong> ${state.selectedRecipient.name}<br><strong>📅</strong> ${formatDate(date)} at ${formatTime(document.getElementById('inv-time').value)}<br><strong>📍</strong> ${document.getElementById('inv-location').value || 'TBD'}<br><strong>📝</strong> ${document.getElementById('inv-details').value || '—'}`;
+  [1,2,3].forEach(i=>{ document.getElementById('send-step-'+i).style.display=(i===n)?'':'none'; });
+  ['dot1','dot2','dot3'].forEach((id,i)=>{ document.getElementById(id).className='step-dot'+(i+1<n?' done':i+1===n?' current':''); });
+  if(n===2){ if(!state.selectedRecipient){ sendStep(1); setStatus('send-status','⚠ Select a recipient first!'); return; } setStatus('send-status','Fill in event details.'); }
+  if(n===3){
+    const title=document.getElementById('inv-title').value.trim(),date=document.getElementById('inv-date').value;
+    if(!title||!date){ sendStep(2); setStatus('send-status','⚠ Title and date required!'); return; }
+    document.getElementById('prev-title').textContent=title;
+    document.getElementById('prev-details').innerHTML=`<strong>TO:</strong> ${state.selectedRecipient.name}<br><strong>📅</strong> ${formatDate(date)} at ${formatTime(document.getElementById('inv-time').value)}<br><strong>📍</strong> ${document.getElementById('inv-location').value||'TBD'}<br><strong>📝</strong> ${document.getElementById('inv-details').value||'—'}`;
     setStatus('send-status','Ready to send!');
   }
 }
-window.sendStep = sendStep;
+window.sendStep=sendStep;
 
 async function sendInvite() {
-  const btn = document.querySelector('#send-step-3 .btn.big');
-  if (btn) { btn.textContent = '⏳ Sending...'; btn.disabled = true; }
+  const btn=document.querySelector('#send-step-3 .btn.big');
+  if(btn){ btn.textContent='⏳ Sending...'; btn.disabled=true; }
   try {
-    await addDoc(collection(db, 'invites'), {
-      fromUid: state.uid, fromName: state.myName,
-      toUid: state.selectedRecipient.uid, toName: state.selectedRecipient.name,
-      ecoCode: state.ecoCode,
-      title: document.getElementById('inv-title').value.trim(),
-      date: document.getElementById('inv-date').value, time: document.getElementById('inv-time').value,
-      location: document.getElementById('inv-location').value, details: document.getElementById('inv-details').value,
-      rsvp: 'pending', createdAt: serverTimestamp(),
+    await addDoc(collection(db,'invites'),{
+      fromUid:state.uid, fromName:state.myName,
+      toUid:state.selectedRecipient.uid, toName:state.selectedRecipient.name,
+      ecoCode:state.ecoCode,
+      title:document.getElementById('inv-title').value.trim(),
+      date:document.getElementById('inv-date').value, time:document.getElementById('inv-time').value,
+      location:document.getElementById('inv-location').value, details:document.getElementById('inv-details').value,
+      rsvp:'pending', createdAt:serverTimestamp(),
     });
-    if (btn) { btn.textContent = '📤 SEND!'; btn.disabled = false; }
-    showPopup({ titleIcon:'✅', title:'Invite Sent!', icon:'📤', msg:`Invite sent to ${state.selectedRecipient.name}!`,
-      btns:[{ label:'SEND ANOTHER', cb: () => { closePopup(); resetSendForm(); }}, { label:'HOME', cb: () => { closePopup(); showMainTab('screen-home','tab-home'); }}]
+    if(btn){ btn.textContent='📤 SEND!'; btn.disabled=false; }
+    showPopup({ titleIcon:'✅',title:'Invite Sent!',icon:'📤',msg:`Invite sent to ${state.selectedRecipient.name}!`,
+      btns:[{label:'SEND ANOTHER',cb:()=>{ closePopup(); resetSendForm(); }},{label:'HOME',cb:()=>{ closePopup(); showMainTab('screen-home','tab-home'); }}]
     });
   } catch(err) {
-    if (btn) { btn.textContent = '📤 SEND!'; btn.disabled = false; }
-    setStatus('send-status','❌ ' + err.message);
+    if(btn){ btn.textContent='📤 SEND!'; btn.disabled=false; }
+    setStatus('send-status','❌ '+err.message);
   }
 }
-window.sendInvite = sendInvite;
+window.sendInvite=sendInvite;
 
 // ─────────────────────────────────────────
 //  RECEIVE / RSVP
 // ─────────────────────────────────────────
 function openReceivedInvite(inv) {
-  state.activeInvite = inv;
-  document.getElementById('rec-title').textContent = inv.title;
-  document.getElementById('rec-details').innerHTML = `<strong>FROM:</strong> ${inv.fromName}<br><strong>📅</strong> ${formatDate(inv.date)} at ${formatTime(inv.time)}<br><strong>📍</strong> ${inv.location || 'TBD'}<br><strong>📝</strong> ${inv.details || '—'}`;
-  const stamp = document.getElementById('receive-stamp');
-  const yBtn  = document.getElementById('rsvp-yes-btn');
-  const nBtn  = document.getElementById('rsvp-no-btn');
-  if (inv.rsvp !== 'pending') {
-    stamp.className   = 'invite-card-stamp' + (inv.rsvp === 'yes' ? ' yes' : '');
-    stamp.textContent = inv.rsvp === 'yes' ? 'GOING!' : 'DECLINED';
-    yBtn.className    = 'btn big' + (inv.rsvp === 'yes' ? ' green-sel' : '');
-    nBtn.className    = 'btn big' + (inv.rsvp === 'no'  ? ' red-sel'   : '');
-    setStatus('receive-status','RSVP: ' + inv.rsvp.toUpperCase());
+  state.activeInvite=inv;
+  document.getElementById('rec-title').textContent=inv.title;
+  document.getElementById('rec-details').innerHTML=`<strong>FROM:</strong> ${inv.fromName}<br><strong>📅</strong> ${formatDate(inv.date)} at ${formatTime(inv.time)}<br><strong>📍</strong> ${inv.location||'TBD'}<br><strong>📝</strong> ${inv.details||'—'}`;
+  const stamp=document.getElementById('receive-stamp');
+  const yBtn=document.getElementById('rsvp-yes-btn'), nBtn=document.getElementById('rsvp-no-btn');
+  document.getElementById('rsvp-error-hint').style.display='none';
+  if(inv.rsvp!=='pending') {
+    stamp.className='invite-card-stamp'+(inv.rsvp==='yes'?' yes':'');
+    stamp.textContent=inv.rsvp==='yes'?'GOING!':'DECLINED';
+    yBtn.className='btn big'+(inv.rsvp==='yes'?' green-sel':'');
+    nBtn.className='btn big'+(inv.rsvp==='no' ?' red-sel':'');
+    setStatus('receive-status','RSVP: '+inv.rsvp.toUpperCase());
   } else {
-    stamp.className = 'invite-card-stamp pending'; stamp.textContent = 'PENDING';
-    yBtn.className  = 'btn big'; nBtn.className = 'btn big';
+    stamp.className='invite-card-stamp pending'; stamp.textContent='PENDING';
+    yBtn.className='btn big'; nBtn.className='btn big';
     setStatus('receive-status','Awaiting your response...');
   }
   showScreen('screen-receive');
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById('tab-receive').classList.add('active');
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('tab-inbox').classList.add('active');
 }
 
 async function doRsvp(choice) {
-  if (!state.activeInvite) return;
-  const inv  = state.activeInvite;
-  const yBtn = document.getElementById('rsvp-yes-btn');
-  const nBtn = document.getElementById('rsvp-no-btn');
-  yBtn.disabled = nBtn.disabled = true;
+  if(!state.activeInvite) return;
+  const inv=state.activeInvite;
+  const yBtn=document.getElementById('rsvp-yes-btn'), nBtn=document.getElementById('rsvp-no-btn');
+  yBtn.disabled=nBtn.disabled=true;
   try {
-    // updateDoc works because the security rule allows toUid to update only the rsvp field
-    await updateDoc(doc(db, 'invites', inv.id), { rsvp: choice });
-    inv.rsvp = choice;
-    const stamp = document.getElementById('receive-stamp');
-    if (choice === 'yes') {
-      stamp.className = 'invite-card-stamp yes'; stamp.textContent = 'GOING!';
-      yBtn.className = 'btn big green-sel'; nBtn.className = 'btn big';
+    await updateDoc(doc(db,'invites',inv.id),{rsvp:choice});
+    inv.rsvp=choice;
+
+    // Create notification for the sender
+    await addDoc(collection(db,'notifications'),{
+      recipientUid:  inv.fromUid,       // sender gets the notification
+      responderName: state.myName,
+      responderUid:  state.uid,
+      eventTitle:    inv.title,
+      rsvp:          choice,
+      read:          false,
+      createdAt:     serverTimestamp(),
+    });
+
+    const stamp=document.getElementById('receive-stamp');
+    if(choice==='yes') {
+      stamp.className='invite-card-stamp yes'; stamp.textContent='GOING!';
+      yBtn.className='btn big green-sel'; nBtn.className='btn big';
       setStatus('receive-status',"✔ You're going!");
-      showPopup({ titleIcon:'🎉', title:'RSVP Confirmed!', icon:'🥳', msg:`You're going to "${inv.title}"! 🎉`, btns:[{ label:'WOO-HOO!', cb: closePopup }] });
+      showPopup({ titleIcon:'🎉',title:'RSVP Confirmed!',icon:'🥳',msg:`You're going to "${inv.title}"! 🎉`,btns:[{label:'WOO-HOO!',cb:closePopup}] });
     } else {
-      stamp.className = 'invite-card-stamp'; stamp.textContent = 'DECLINED';
-      yBtn.className = 'btn big'; nBtn.className = 'btn big red-sel';
+      stamp.className='invite-card-stamp'; stamp.textContent='DECLINED';
+      yBtn.className='btn big'; nBtn.className='btn big red-sel';
       setStatus('receive-status','✘ You declined.');
-      showPopup({ titleIcon:'😢', title:'RSVP Sent', icon:'😞', msg:`You won't be attending "${inv.title}".`, btns:[{ label:'OK', cb: closePopup }] });
+      showPopup({ titleIcon:'😢',title:'RSVP Sent',icon:'😞',msg:`You won't be attending "${inv.title}".`,btns:[{label:'OK',cb:closePopup}] });
     }
-    // Go back to home after a moment so the inbox updates
-    setTimeout(() => { showMainTab('screen-home','tab-home'); }, 1800);
+    setTimeout(()=>{ showMainTab('screen-home','tab-home'); },1800);
   } catch(err) {
     setStatus('receive-status','❌ Permission denied. Check Firestore rules.');
-    document.getElementById('rsvp-error-hint').style.display = '';
+    document.getElementById('rsvp-error-hint').style.display='';
   } finally {
-    yBtn.disabled = nBtn.disabled = false;
+    yBtn.disabled=nBtn.disabled=false;
   }
 }
-window.doRsvp = doRsvp;
+window.doRsvp=doRsvp;
 
 function doAddCalendar() {
-  const inv = state.activeInvite; if (!inv) return;
-  const dt = (inv.date||'').replace(/-/g,''), tm = (inv.time||'1900').replace(':','');
-  const ics = ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//EcoInvite//EN','BEGIN:VEVENT',
+  const inv=state.activeInvite; if(!inv) return;
+  const dt=(inv.date||'').replace(/-/g,''), tm=(inv.time||'1900').replace(':','');
+  const ics=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//EcoInvite//EN','BEGIN:VEVENT',
     `DTSTART:${dt}T${tm}00`,`SUMMARY:${inv.title}`,`DESCRIPTION:${inv.details||''}`,
     `LOCATION:${(inv.location||'').replace(/,/g,'\\,')}`, 'END:VEVENT','END:VCALENDAR'].join('\r\n');
-  const blob = new Blob([ics], { type:'text/calendar;charset=utf-8' });
-  const url = URL.createObjectURL(blob), a = document.createElement('a');
-  a.href = url; a.download = 'invite.ics'; a.click(); URL.revokeObjectURL(url);
+  const blob=new Blob([ics],{type:'text/calendar;charset=utf-8'});
+  const url=URL.createObjectURL(blob), a=document.createElement('a');
+  a.href=url; a.download='invite.ics'; a.click(); URL.revokeObjectURL(url);
   setStatus('receive-status','📅 Calendar file downloaded!');
 }
-window.doAddCalendar = doAddCalendar;
+window.doAddCalendar=doAddCalendar;
 
 // ─────────────────────────────────────────
-//  CALENDAR & COUNTDOWN
+//  CALENDAR / EVENTS
 // ─────────────────────────────────────────
-let cdInterval = null;
 function refreshCalendar() {
-  const all = [...state.receivedInvites, ...state.sentInvites];
-  const now = new Date();
-  const upcoming = all.filter(e => e.date && new Date(e.date+'T'+(e.time||'00:00')) > now).sort((a,b) => new Date(a.date)-new Date(b.date));
-  const cdArea = document.getElementById('countdown-area'), noMsg = document.getElementById('no-events-msg');
-  if (upcoming.length === 0) { cdArea.style.display='none'; noMsg.style.display=''; if (cdInterval) clearInterval(cdInterval); }
-  else {
-    const next = upcoming[0]; cdArea.style.display=''; noMsg.style.display='none';
-    document.getElementById('cd-event-name').textContent = next.title;
-    if (cdInterval) clearInterval(cdInterval);
-    function tick() {
-      const diff = new Date(next.date+'T'+(next.time||'00:00')) - new Date();
-      if (diff<=0) { ['cd-days','cd-hours','cd-mins','cd-secs'].forEach(id => document.getElementById(id).textContent='00'); return; }
-      document.getElementById('cd-days').textContent  = String(Math.floor(diff/86400000)).padStart(2,'0');
-      document.getElementById('cd-hours').textContent = String(Math.floor((diff%86400000)/3600000)).padStart(2,'0');
-      document.getElementById('cd-mins').textContent  = String(Math.floor((diff%3600000)/60000)).padStart(2,'0');
-      document.getElementById('cd-secs').textContent  = String(Math.floor((diff%60000)/1000)).padStart(2,'0');
-    }
-    tick(); cdInterval = setInterval(tick, 1000);
+  // Show: received invites where I said YES, sent invites where recipient said YES
+  const receivedYes = state.receivedInvites.filter(e=>e.rsvp==='yes');
+  const sentYes     = state.sentInvites.filter(e=>e.rsvp==='yes');
+  const all         = [...receivedYes,...sentYes];
+  const now         = new Date();
+  const upcoming    = all.filter(e=>e.date&&new Date(e.date+'T'+(e.time||'00:00'))>now)
+                         .sort((a,b)=>new Date(a.date)-new Date(b.date));
+
+  // Auto-select first event if none selected
+  if(upcoming.length>0 && !state.selectedCalEvent) {
+    state.selectedCalEvent=upcoming[0];
   }
+
+  renderTimer();
   buildMiniCal(all);
-  const listEl = document.getElementById('all-events-list');
-  if (all.length===0) { listEl.innerHTML=`<span style="font-family:var(--font-mono);font-size:11px;color:#888;">No events yet.</span>`; return; }
-  listEl.innerHTML = [...all].sort((a,b)=>new Date(a.date)-new Date(b.date)).map(e => {
-    const isPast = e.date && new Date(e.date)<now, dir = e.fromUid===state.uid ? '▲ Sent' : '▼ Received';
-    return `<div style="padding:4px 0;border-bottom:1px solid var(--mid);opacity:${isPast?0.5:1}"><div style="font-family:var(--font-main);font-size:17px;">${e.title}</div><div style="font-family:var(--font-mono);font-size:10px;color:#555;">${dir} · ${formatDate(e.date)} · RSVP: ${(e.rsvp||'—').toUpperCase()}</div></div>`;
-  }).join('');
+
+  // Event list — clickable
+  const listEl=document.getElementById('cal-event-list');
+  if(upcoming.length===0) {
+    listEl.innerHTML='<div style="font-family:var(--font-mono);font-size:11px;color:#888;padding:6px;">No upcoming events.</div>';
+  } else {
+    listEl.innerHTML=upcoming.map(e=>{
+      const isSelected=state.selectedCalEvent&&e.id===state.selectedCalEvent.id;
+      const dir=e.fromUid===state.uid?'▲ Sent':'▼ Received';
+      return `<div class="cal-event-row${isSelected?' selected':''}" onclick="selectCalEvent('${e.id}')">
+        <div class="cal-event-title">${e.title}</div>
+        <div class="cal-event-meta">${dir} · ${formatDateShort(e.date)} ${formatTime(e.time)}</div>
+      </div>`;
+    }).join('');
+  }
 }
-window.refreshCalendar = refreshCalendar;
+window.refreshCalendar=refreshCalendar;
+
+window.selectCalEvent=function(id) {
+  const receivedYes=state.receivedInvites.filter(e=>e.rsvp==='yes');
+  const sentYes=state.sentInvites.filter(e=>e.rsvp==='yes');
+  const all=[...receivedYes,...sentYes];
+  state.selectedCalEvent=all.find(e=>e.id===id)||null;
+  renderTimer();
+  // Highlight selected
+  document.querySelectorAll('.cal-event-row').forEach(el=>el.classList.remove('selected'));
+  const el=document.querySelector(`.cal-event-row[onclick="selectCalEvent('${id}')"]`);
+  if(el) el.classList.add('selected');
+};
+
+function renderTimer() {
+  if(state.cdInterval) clearInterval(state.cdInterval);
+  const ev=state.selectedCalEvent;
+  const noEvMsg=document.getElementById('no-events-msg');
+  const timerWrap=document.getElementById('timer-wrap');
+  if(!ev) {
+    noEvMsg.style.display=''; timerWrap.style.display='none'; return;
+  }
+  noEvMsg.style.display='none'; timerWrap.style.display='';
+
+  function tick() {
+    const diff=new Date(ev.date+'T'+(ev.time||'00:00'))-new Date();
+    if(diff<=0) {
+      ['cd-d','cd-h','cd-m','cd-s'].forEach(id=>{ document.getElementById(id).textContent='00'; });
+      clearInterval(state.cdInterval);
+      return;
+    }
+    document.getElementById('cd-d').textContent=pad(Math.floor(diff/86400000));
+    document.getElementById('cd-h').textContent=pad(Math.floor((diff%86400000)/3600000));
+    document.getElementById('cd-m').textContent=pad(Math.floor((diff%3600000)/60000));
+    document.getElementById('cd-s').textContent=pad(Math.floor((diff%60000)/1000));
+  }
+  tick(); state.cdInterval=setInterval(tick,1000);
+}
 
 function buildMiniCal(allEvents) {
-  const cal=document.getElementById('mini-cal'), now=new Date(), year=now.getFullYear(), month=now.getMonth();
+  const cal=document.getElementById('mini-cal'),now=new Date(),year=now.getFullYear(),month=now.getMonth();
   const first=new Date(year,month,1).getDay(), days=new Date(year,month+1,0).getDate();
   const months=['January','February','March','April','May','June','July','August','September','October','November','December'];
   const evtDates=new Set(allEvents.map(e=>e.date));
   let html=`<div class="cal-header">${months[month]} ${year}</div><div class="cal-grid">`;
-  ['Su','Mo','Tu','We','Th','Fr','Sa'].forEach(d=>{html+=`<div class="cal-day-head">${d}</div>`;});
+  ['Su','Mo','Tu','We','Th','Fr','Sa'].forEach(d=>{ html+=`<div class="cal-day-head">${d}</div>`; });
   for(let i=0;i<first;i++) html+=`<div class="cal-day other-month"></div>`;
-  for(let d=1;d<=days;d++){const ds=`${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;html+=`<div class="${evtDates.has(ds)?'cal-day event-day':d===now.getDate()?'cal-day today':'cal-day'}">${d}</div>`;}
+  for(let d=1;d<=days;d++){
+    const ds=`${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    html+=`<div class="${evtDates.has(ds)?'cal-day event-day':d===now.getDate()?'cal-day today':'cal-day'}">${d}</div>`;
+  }
   html+='</div>'; cal.innerHTML=html;
 }
 
 </script>
 
 <style>
-@import url('https://fonts.googleapis.com/css2?family=VT323&family=Share+Tech+Mono&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=VT323&family=Share+Tech+Mono&family=Orbitron:wght@700&display=swap');
 
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
 :root{
   --gray:#c0c0c0;--white:#ffffff;--black:#000000;--dark:#0a0a0a;
   --shadow:#808080;--mid:#dfdfdf;--blue:#000080;--blue2:#1084d0;
   --teal:#008080;--green:#008000;--red:#800000;--yellow:#ffff00;
   --lt-green:#c8f0c8;--lt-red:#f0c8c8;--lt-yellow:#ffffc8;
-  --font-main:'VT323',monospace;--font-mono:'Share Tech Mono',monospace;
+  --font-main:'VT323',monospace;--font-mono:'Share Tech Mono',monospace;--font-orb:'Orbitron',monospace;
 }
-
 html,body{width:100%;height:100%;overflow:hidden;}
+body{display:flex;align-items:center;justify-content:center;min-height:100vh;min-height:100dvh;background:radial-gradient(ellipse at center,#1a1a2e 0%,#0d0d0d 100%);}
 
-body{
-  display:flex;align-items:center;justify-content:center;
-  min-height:100vh;min-height:100dvh;
-  background:radial-gradient(ellipse at center,#1a1a2e 0%,#0d0d0d 100%);
-}
-
-/* ── OUTER WRAPPER — controls desktop centering ── */
-.app-wrapper {
-  width:100%;
-  height:100vh;
-  height:100dvh;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-}
-
-/* ── SHELL ── */
-/* Mobile: fill the screen edge to edge */
-.phone-shell {
-  width:100%;
-  height:100vh;
-  height:100dvh;
-  position:relative;
-  display:flex;
-  flex-direction:column;
-  background:transparent;
-  border-radius:0;
-  padding:0;
-}
-
-/* Desktop (≥900px): centered rectangular column, no phone chrome */
-@media (min-width:900px) {
-  .phone-shell {
-    width:33vw;
-    min-width:340px;
-    max-width:480px;
-    height:min(880px,95vh);
-    height:min(880px,95dvh);
-    background:transparent;
-    border-radius:0;
-    padding:0;
-    box-shadow:0 8px 48px rgba(0,0,0,.7);
-  }
-}
-
-/* Tablet (500–899px): slightly constrained, still no phone chrome */
-@media (min-width:500px) and (max-width:899px) and (min-height:600px) {
-  .phone-shell {
-    width:min(420px,92vw);
-    height:min(880px,95vh);
-    height:min(880px,95dvh);
-    background:transparent;
-    border-radius:0;
-    padding:0;
-    box-shadow:0 8px 40px rgba(0,0,0,.6);
-  }
-}
-
-/* Notch is never shown — no phone frame on any breakpoint */
+/* ── LAYOUT ── */
+.app-wrapper{width:100%;height:100vh;height:100dvh;display:flex;align-items:center;justify-content:center;}
+.phone-shell{width:100%;height:100vh;height:100dvh;position:relative;display:flex;flex-direction:column;background:transparent;border-radius:0;padding:0;}
+@media(min-width:900px){.phone-shell{width:33vw;min-width:340px;max-width:480px;height:min(880px,95vh);height:min(880px,95dvh);box-shadow:0 8px 48px rgba(0,0,0,.7);}}
+@media(min-width:500px)and(max-width:899px)and(min-height:600px){.phone-shell{width:min(420px,92vw);height:min(880px,95vh);height:min(880px,95dvh);box-shadow:0 8px 40px rgba(0,0,0,.6);}}
 .phone-notch{display:none !important;}
-.notch-cam{display:none;}
-.notch-speaker{display:none;}
-
 .phone-screen{flex:1;background:var(--teal);border-radius:0;overflow:hidden;position:relative;display:flex;flex-direction:column;min-height:0;}
-
 .phone-screen::before{content:'';position:absolute;inset:0;pointer-events:none;z-index:0;background-image:url("data:image/svg+xml,%3Csvg width='4' height='4' xmlns='http://www.w3.org/2000/svg'%3E%3Crect x='0' y='0' width='2' height='2' fill='%23008080'/%3E%3Crect x='2' y='2' width='2' height='2' fill='%23008080'/%3E%3Crect x='0' y='2' width='2' height='2' fill='%23007070'/%3E%3Crect x='2' y='0' width='2' height='2' fill='%23007070'/%3E%3C/svg%3E");}
 
 /* ── SCREENS ── */
-.screen{position:absolute;inset:0;display:none;flex-direction:column;z-index:1;overflow-y:auto;overflow-x:hidden;padding-bottom:calc(52px + env(safe-area-inset-bottom,0px));padding-top:env(safe-area-inset-top,0px);}
+.screen{position:absolute;inset:0;display:none;flex-direction:column;z-index:1;overflow-y:auto;overflow-x:hidden;padding-bottom:calc(52px + env(safe-area-inset-bottom,0px));}
 .screen.active{display:flex;}
-@media(min-width:500px){.screen{padding-top:0;}}
-.screen::-webkit-scrollbar{width:6px;}
+.screen::-webkit-scrollbar{width:5px;}
 .screen::-webkit-scrollbar-track{background:var(--gray);}
-.screen::-webkit-scrollbar-thumb{background:var(--shadow);border-top:1px solid var(--white);border-left:1px solid var(--white);}
+.screen::-webkit-scrollbar-thumb{background:var(--shadow);}
 
 /* ── WIN98 ── */
-.win{background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);margin:8px;flex-shrink:0;max-width:100%;overflow-wrap:break-word;word-break:break-word;}
-.win-title{background:linear-gradient(90deg,var(--blue) 0%,var(--blue2) 100%);color:white;font-family:var(--font-main);font-size:clamp(14px,4.5vw,18px);padding:2px 6px;display:flex;align-items:center;gap:5px;user-select:none;min-height:24px;overflow:hidden;}
-@media(min-width:500px){.win-title{font-size:18px;}}
+.win{background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);margin:6px;flex-shrink:0;max-width:100%;overflow-wrap:break-word;word-break:break-word;}
+.win-title{background:linear-gradient(90deg,var(--blue) 0%,var(--blue2) 100%);color:white;font-family:var(--font-main);font-size:17px;padding:2px 6px;display:flex;align-items:center;gap:5px;user-select:none;min-height:22px;overflow:hidden;}
 .win-btns{margin-left:auto;display:flex;gap:2px;}
-.wbtn{background:var(--gray);border-top:1px solid var(--white);border-left:1px solid var(--white);border-right:1px solid var(--dark);border-bottom:1px solid var(--dark);width:14px;height:12px;font-size:8px;font-family:var(--font-main);cursor:pointer;display:flex;align-items:center;justify-content:center;color:#000;line-height:1;}
-.win-body{padding:10px;}
+.wbtn{background:var(--gray);border-top:1px solid var(--white);border-left:1px solid var(--white);border-right:1px solid var(--dark);border-bottom:1px solid var(--dark);width:14px;height:12px;font-size:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#000;line-height:1;}
+.win-body{padding:6px 8px;}
 
-.inset{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:8px;margin-bottom:8px;font-family:var(--font-mono);font-size:12px;line-height:1.7;overflow-wrap:break-word;word-break:break-word;}
+/* compact win-body for home */
+.win-body-sm{padding:4px 8px;}
+
+.inset{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:5px 7px;margin-bottom:6px;font-family:var(--font-mono);font-size:11px;line-height:1.5;overflow-wrap:break-word;word-break:break-word;}
 
 /* ── BUTTONS ── */
-.btn{font-family:var(--font-main);font-size:20px;padding:3px 12px;background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);cursor:pointer;color:#000;letter-spacing:.5px;display:inline-flex;align-items:center;gap:5px;}
-.btn:active{border-top:2px solid var(--dark);border-left:2px solid var(--dark);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding-top:5px;padding-left:14px;}
+.btn{font-family:var(--font-main);font-size:18px;padding:2px 10px;background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);cursor:pointer;color:#000;letter-spacing:.5px;display:inline-flex;align-items:center;gap:4px;}
+.btn:active{border-top:2px solid var(--dark);border-left:2px solid var(--dark);border-right:2px solid var(--white);border-bottom:2px solid var(--white);}
 .btn:disabled{opacity:.5;cursor:not-allowed;}
-.btn.full{width:100%;justify-content:center;margin-bottom:6px;}
-.btn.big{font-size:clamp(18px,6vw,24px);padding:6px 14px;}
-@media(min-width:500px){.btn.big{font-size:22px;}}
+.btn.full{width:100%;justify-content:center;margin-bottom:5px;}
+.btn.big{font-size:20px;padding:4px 12px;}
 .btn.green-sel{background:var(--lt-green);}
 .btn.red-sel{background:var(--lt-red);}
 .btn.danger{background:var(--lt-red);color:var(--red);}
 
 /* ── INPUTS ── */
-.field-row{display:flex;flex-direction:column;gap:2px;margin-bottom:8px;}
-.field-row label{font-family:var(--font-main);font-size:18px;letter-spacing:.5px;}
-.field-row input,.field-row textarea,.field-row select{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:3px 6px;font-family:var(--font-mono);font-size:12px;outline:none;width:100%;resize:none;}
+.field-row{display:flex;flex-direction:column;gap:2px;margin-bottom:6px;}
+.field-row label{font-family:var(--font-main);font-size:16px;letter-spacing:.5px;}
+.field-row input,.field-row textarea{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:2px 5px;font-family:var(--font-mono);font-size:11px;outline:none;width:100%;resize:none;}
 .field-row input:focus,.field-row textarea:focus{outline:1px dotted var(--blue);outline-offset:-1px;}
 
-.divider{height:2px;background:var(--shadow);border-bottom:1px solid var(--white);margin:8px 0;}
+.divider{height:2px;background:var(--shadow);border-bottom:1px solid var(--white);margin:5px 0;}
 
-.status-bar{background:var(--gray);border-top:1px solid var(--shadow);padding:2px 6px;font-family:var(--font-main);font-size:15px;display:flex;gap:4px;}
-.status-panel{border-top:1px solid var(--shadow);border-left:1px solid var(--shadow);border-right:1px solid var(--white);border-bottom:1px solid var(--white);padding:1px 6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.status-bar{background:var(--gray);border-top:1px solid var(--shadow);padding:1px 5px;font-family:var(--font-main);font-size:13px;display:flex;gap:3px;}
+.status-panel{border-top:1px solid var(--shadow);border-left:1px solid var(--shadow);border-right:1px solid var(--white);border-bottom:1px solid var(--white);padding:1px 5px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 
 /* ── TASKBAR ── */
-.taskbar{position:absolute;bottom:0;left:0;right:0;background:var(--gray);border-top:2px solid var(--white);display:flex;align-items:center;padding:0 4px;padding-bottom:env(safe-area-inset-bottom,0px);gap:3px;z-index:50;min-height:52px;}
-.tab-btn{font-family:var(--font-main);font-size:12px;padding:2px 3px;background:var(--gray);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);flex:1;cursor:pointer;text-align:center;color:#000;line-height:1.1;height:38px;display:flex;flex-direction:column;align-items:center;justify-content:center;}
+.taskbar{position:absolute;bottom:0;left:0;right:0;background:var(--gray);border-top:2px solid var(--white);display:flex;align-items:center;padding:0 3px;padding-bottom:env(safe-area-inset-bottom,0px);gap:2px;z-index:50;min-height:50px;}
+.tab-btn{font-family:var(--font-main);font-size:11px;padding:2px 2px;background:var(--gray);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);flex:1;cursor:pointer;text-align:center;color:#000;line-height:1.1;height:36px;display:flex;flex-direction:column;align-items:center;justify-content:center;}
 .tab-btn.active{border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--shadow);border-bottom:2px solid var(--shadow);}
-.tab-btn .tab-icon{font-size:15px;}
-.tab-btn .tab-label{font-size:9px;}
-.taskbar-clock{font-family:var(--font-mono);font-size:9px;border-top:1px solid var(--shadow);border-left:1px solid var(--shadow);border-right:1px solid var(--white);border-bottom:1px solid var(--white);padding:2px 4px;text-align:center;line-height:1.4;white-space:nowrap;}
+.tab-btn .tab-icon{font-size:14px;}
+.tab-btn .tab-label{font-size:8px;letter-spacing:.3px;}
+.taskbar-clock{font-family:var(--font-mono);font-size:8px;border-top:1px solid var(--shadow);border-left:1px solid var(--shadow);border-right:1px solid var(--white);border-bottom:1px solid var(--white);padding:2px 4px;text-align:center;line-height:1.4;white-space:nowrap;}
 
 /* ── POPUP ── */
 .popup-overlay{display:none;position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:200;align-items:center;justify-content:center;padding:16px;}
 .popup-overlay.show{display:flex;}
 .popup-win{background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);width:100%;max-width:300px;max-height:90vh;overflow-y:auto;}
-.popup-body{padding:14px 12px 10px;text-align:center;}
-.popup-icon{font-size:36px;display:block;margin-bottom:6px;}
-.popup-msg{font-family:var(--font-main);font-size:20px;line-height:1.3;margin-bottom:12px;}
-.popup-code{font-family:var(--font-mono);font-size:22px;letter-spacing:4px;background:var(--lt-yellow);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:6px 10px;display:inline-block;margin-bottom:10px;}
+.popup-body{padding:12px 10px 8px;text-align:center;}
+.popup-icon{font-size:32px;display:block;margin-bottom:4px;}
+.popup-msg{font-family:var(--font-main);font-size:18px;line-height:1.3;margin-bottom:10px;white-space:pre-line;}
+.popup-code{font-family:var(--font-mono);font-size:20px;letter-spacing:4px;background:var(--lt-yellow);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:5px 10px;display:inline-block;margin-bottom:8px;}
 .popup-btns{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;}
-.popup-loading{font-family:var(--font-mono);font-size:11px;color:#555;padding:8px 0;}
+.popup-loading{font-family:var(--font-mono);font-size:11px;color:#555;padding:6px 0;}
 .loading-dots::after{content:'...';animation:ldots 1.2s steps(4,end) infinite;}
 @keyframes ldots{0%{content:'.'}33%{content:'..'}66%{content:'...'}100%{content:'';}}
 
+/* ── RSVP NOTIFICATION POPUP ── */
+.notif-popup-overlay{display:none;position:absolute;inset:0;background:rgba(0,0,0,.5);z-index:300;align-items:center;justify-content:center;padding:20px;}
+.notif-popup-overlay.show{display:flex;}
+.notif-popup-win{background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);width:100%;max-width:280px;padding:14px;}
+.notif-popup-icon{font-size:40px;text-align:center;display:block;margin-bottom:8px;}
+.notif-popup-msg{font-family:var(--font-main);font-size:20px;text-align:center;margin-bottom:6px;line-height:1.3;}
+.notif-popup-time{font-family:var(--font-mono);font-size:10px;color:#666;text-align:center;margin-bottom:12px;}
+.notif-popup-close{display:block;width:100%;}
+
+/* ── ADMIN LOGIN ── */
+.admin-login-overlay{display:none;position:absolute;inset:0;background:rgba(0,0,0,.7);z-index:400;align-items:center;justify-content:center;padding:20px;}
+.admin-login-overlay.show{display:flex;}
+.admin-login-box{background:#1a1a1a;border:1px solid #333;padding:20px;width:100%;max-width:280px;}
+.admin-login-title{font-family:var(--font-mono);font-size:11px;color:#555;letter-spacing:3px;margin-bottom:16px;text-align:center;}
+.admin-field{margin-bottom:10px;}
+.admin-field label{display:block;font-family:var(--font-mono);font-size:10px;color:#555;letter-spacing:2px;margin-bottom:3px;}
+.admin-field input{width:100%;background:#0d0d0d;border:1px solid #333;color:#c0c0c0;font-family:var(--font-mono);font-size:12px;padding:5px 8px;outline:none;}
+.admin-field input:focus{border-color:#555;}
+.admin-btns{display:flex;gap:8px;margin-top:14px;}
+.admin-login-btn{flex:1;background:transparent;border:1px solid #444;color:#888;font-family:var(--font-mono);font-size:10px;padding:6px;cursor:pointer;letter-spacing:2px;}
+.admin-login-btn.primary{border-color:#1084d0;color:#1084d0;}
+.admin-login-btn:hover{background:#111;}
+.admin-msg{font-family:var(--font-mono);font-size:10px;color:#cc4444;text-align:center;margin-top:8px;min-height:14px;}
+
+/* ── ADMIN PANEL ── */
+.admin-panel-overlay{display:none;position:absolute;inset:0;background:#0a0a0a;z-index:500;flex-direction:column;overflow:hidden;}
+.admin-panel-overlay.show{display:flex;}
+.admin-header{background:#111;border-bottom:1px solid #222;padding:8px 12px;display:flex;align-items:center;gap:10px;flex-shrink:0;}
+.admin-header-title{font-family:var(--font-mono);font-size:11px;color:#555;letter-spacing:3px;flex:1;}
+.admin-header-status{font-family:var(--font-mono);font-size:9px;color:#333;flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.admin-close-btn{background:transparent;border:1px solid #333;color:#555;font-family:var(--font-mono);font-size:9px;padding:3px 8px;cursor:pointer;letter-spacing:1px;}
+.admin-close-btn:hover{border-color:#666;color:#888;}
+.admin-body{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:12px;}
+.admin-stats{display:grid;grid-template-columns:1fr 1fr;gap:6px;}
+.admin-stat{background:#111;border:1px solid #1a1a1a;padding:8px 10px;}
+.admin-stat-num{font-family:var(--font-mono);font-size:20px;color:#1084d0;display:block;}
+.admin-stat-label{font-family:var(--font-mono);font-size:9px;color:#333;letter-spacing:2px;display:block;margin-top:2px;}
+.admin-section-title{font-family:var(--font-mono);font-size:9px;color:#444;letter-spacing:3px;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid #1a1a1a;}
+.admin-row{background:#111;border:1px solid #1a1a1a;padding:6px 8px;display:flex;align-items:center;gap:8px;margin-bottom:4px;}
+.admin-row-info{flex:1;min-width:0;}
+.admin-eco-name{display:block;font-family:var(--font-mono);font-size:11px;color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.admin-eco-meta{display:block;font-family:var(--font-mono);font-size:9px;color:#333;letter-spacing:1px;margin-top:1px;}
+.admin-row-btns{display:flex;gap:4px;flex-shrink:0;}
+.admin-btn{background:transparent;border:1px solid #333;color:#555;font-family:var(--font-mono);font-size:9px;padding:3px 6px;cursor:pointer;letter-spacing:1px;white-space:nowrap;}
+.admin-btn:hover{background:#1a1a1a;color:#888;}
+.admin-btn.danger{border-color:#441111;color:#663333;}
+.admin-btn.danger:hover{background:#1a0a0a;color:#cc4444;}
+.admin-empty{font-family:var(--font-mono);font-size:10px;color:#333;padding:8px;text-align:center;}
+.admin-clear-btn{background:transparent;border:1px solid #441111;color:#663333;font-family:var(--font-mono);font-size:9px;padding:6px 12px;cursor:pointer;letter-spacing:2px;width:100%;margin-bottom:4px;}
+.admin-clear-btn:hover{background:#1a0a0a;color:#cc4444;}
+.admin-refresh-btn{background:transparent;border:1px solid #1a3a1a;color:#335533;font-family:var(--font-mono);font-size:9px;padding:6px 12px;cursor:pointer;letter-spacing:2px;width:100%;}
+.admin-refresh-btn:hover{background:#0a1a0a;color:#55aa55;}
+
 /* ── BOOT ── */
-#screen-boot{background:#000;align-items:center;justify-content:center;padding-bottom:0 !important;padding-top:0 !important;}
-.boot-logo{font-family:var(--font-main);font-size:clamp(36px,12vw,48px);color:var(--gray);letter-spacing:3px;text-align:center;line-height:1;margin-bottom:6px;}
+#screen-boot{background:#000;align-items:center;justify-content:center;padding-bottom:0 !important;}
+.boot-logo{font-family:var(--font-main);font-size:clamp(36px,12vw,48px);color:var(--gray);letter-spacing:3px;text-align:center;line-height:1;margin-bottom:6px;cursor:pointer;user-select:none;}
 .boot-sub{font-family:var(--font-mono);font-size:11px;color:#666;letter-spacing:2px;margin-bottom:30px;}
 .boot-bar-wrap{width:200px;height:20px;background:#000;border:2px solid #555;margin-bottom:10px;overflow:hidden;}
 .boot-bar-fill{height:100%;background:var(--blue2);width:0%;transition:width .3s;}
@@ -887,67 +1162,91 @@ body{
 #screen-welcome{justify-content:flex-start;padding:0;}
 .welcome-inner{padding:16px 8px 8px;}
 @media(min-width:500px){#screen-welcome{justify-content:center;}.welcome-inner{padding:40px 8px 8px;}}
-.app-logo-big{font-family:var(--font-main);font-size:clamp(32px,10vw,46px);color:var(--blue);text-align:center;letter-spacing:2px;line-height:1;text-shadow:2px 2px 0 rgba(0,0,128,.25);}
-@media(min-width:500px){.app-logo-big{font-size:44px;}}
-.app-tagline{font-family:var(--font-mono);font-size:11px;text-align:center;color:#444;margin-bottom:14px;letter-spacing:1px;}
+.app-logo-big{font-family:var(--font-main);font-size:clamp(32px,10vw,44px);color:var(--blue);text-align:center;letter-spacing:2px;line-height:1;text-shadow:2px 2px 0 rgba(0,0,128,.25);cursor:pointer;user-select:none;}
+.app-tagline{font-family:var(--font-mono);font-size:11px;text-align:center;color:#444;margin-bottom:12px;letter-spacing:1px;}
 
 /* ── ECO BADGE ── */
-.eco-badge{background:var(--lt-green);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:4px 8px;font-family:var(--font-main);font-size:clamp(13px,4vw,17px);margin-bottom:8px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;word-break:break-all;}
-@media(min-width:500px){.eco-badge{font-size:16px;}}
+.eco-badge{background:var(--lt-green);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:3px 7px;font-family:var(--font-main);font-size:14px;margin-bottom:6px;display:flex;flex-wrap:wrap;gap:3px;align-items:center;}
 
 /* ── MEMBERS ── */
-.member-item{display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid var(--mid);font-family:var(--font-mono);font-size:12px;}
-.member-dot{width:8px;height:8px;background:var(--green);border-radius:50%;flex-shrink:0;}
+.member-item{display:flex;align-items:center;gap:5px;padding:2px 0;border-bottom:1px solid var(--mid);font-family:var(--font-mono);font-size:11px;}
+.member-dot{width:7px;height:7px;background:var(--green);border-radius:50%;flex-shrink:0;}
+
+/* ── TICKER — Amber seven-segment ── */
+.ticker{background:#0a0800;overflow:hidden;white-space:nowrap;flex-shrink:0;position:relative;height:26px;display:flex;align-items:center;}
+.ticker::after{content:'';position:absolute;inset:0;background:repeating-linear-gradient(to bottom,transparent 0px,transparent 2px,rgba(0,0,0,.12) 2px,rgba(0,0,0,.12) 3px);pointer-events:none;}
+.ticker-inner{display:inline-block;white-space:nowrap;animation:scroll-ticker 22s linear infinite;padding-left:100%;font-family:var(--font-orb);font-size:12px;color:#ffaa00;text-shadow:0 0 4px #ffaa00,0 0 10px #ff880055;letter-spacing:3px;font-weight:700;}
+@keyframes scroll-ticker{from{transform:translateX(0)}to{transform:translateX(-100%)}}
+
+/* ── NOTIFICATIONS BOX ── */
+.notif-item{display:flex;align-items:center;gap:6px;padding:4px 6px;border-bottom:1px solid var(--mid);cursor:pointer;font-family:var(--font-mono);font-size:11px;}
+.notif-item:hover{background:var(--lt-yellow);}
+.notif-icon{flex-shrink:0;font-size:14px;}
+.notif-text em{font-style:normal;color:var(--blue);font-weight:bold;}
+.notif-rsvp{background:#f0fff0;}
+.notif-pending{background:var(--lt-yellow);}
+
+/* ── INBOX SCREEN ── */
+.inbox-row{display:flex;align-items:center;padding:6px 8px;border-bottom:1px solid var(--mid);cursor:pointer;gap:8px;}
+.inbox-row:hover{filter:brightness(0.95);}
+.inbox-row-main{flex:1;min-width:0;}
+.inbox-title{display:block;font-family:var(--font-main);font-size:18px;color:var(--blue);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.inbox-date{display:block;font-family:var(--font-mono);font-size:10px;color:#555;}
+.inbox-arrow{font-size:18px;font-family:var(--font-mono);flex-shrink:0;}
 
 /* ── INVITE CARD ── */
-.invite-card{background:var(--lt-yellow);border:2px dashed var(--shadow);padding:10px;margin-bottom:8px;font-family:var(--font-mono);font-size:12px;position:relative;overflow-wrap:break-word;word-break:break-word;}
-.invite-card-title{font-family:var(--font-main);font-size:clamp(18px,6vw,26px);color:var(--blue);margin-bottom:4px;letter-spacing:1px;padding-right:60px;}
-@media(min-width:500px){.invite-card-title{font-size:24px;}}
-.invite-card-stamp{position:absolute;top:8px;right:8px;font-family:var(--font-main);font-size:clamp(14px,4.5vw,24px);color:var(--red);border:3px solid var(--red);padding:0 4px;transform:rotate(12deg);opacity:.8;line-height:1;white-space:nowrap;}
+.invite-card{background:var(--lt-yellow);border:2px dashed var(--shadow);padding:8px;margin-bottom:6px;font-family:var(--font-mono);font-size:11px;position:relative;overflow-wrap:break-word;word-break:break-word;}
+.invite-card-title{font-family:var(--font-main);font-size:22px;color:var(--blue);margin-bottom:3px;letter-spacing:1px;padding-right:55px;}
+.invite-card-stamp{position:absolute;top:6px;right:6px;font-family:var(--font-main);font-size:18px;color:var(--red);border:3px solid var(--red);padding:0 4px;transform:rotate(12deg);opacity:.8;line-height:1;white-space:nowrap;}
 .invite-card-stamp.yes{color:var(--green);border-color:var(--green);transform:rotate(-8deg);}
 .invite-card-stamp.pending{color:#888;border-color:#888;}
+.rsvp-error-hint{background:var(--lt-red);border:1px solid var(--red);padding:5px 7px;font-family:var(--font-mono);font-size:10px;color:var(--red);margin-bottom:6px;line-height:1.5;}
 
-/* ── COUNTDOWN ── */
-.countdown-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;}
-.cd-block{background:var(--blue);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);padding:8px 4px;text-align:center;}
-.cd-num{font-family:var(--font-main);font-size:clamp(32px,10vw,48px);color:var(--yellow);line-height:1;display:block;}
-@media(min-width:500px){.cd-num{font-size:44px;}}
-.cd-label{font-family:var(--font-mono);font-size:10px;color:#aaa;letter-spacing:2px;}
+/* ── WIN98 TIMER (Option B layout, Option A Win98 style) ── */
+#timer-wrap{margin-bottom:6px;}
+.timer-seg-row{display:flex;gap:3px;align-items:flex-end;}
+.timer-seg{flex:1;background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);text-align:center;padding:3px 2px 1px;}
+.timer-seg .seg-num{font-family:var(--font-orb);font-size:20px;color:#000080;line-height:1;display:block;}
+.timer-seg .seg-lbl{font-family:var(--font-mono);font-size:7px;color:#555;letter-spacing:1px;}
+.timer-seg-sep{font-family:var(--font-orb);font-size:20px;color:#808080;padding-bottom:10px;user-select:none;}
+
+/* ── CALENDAR EVENT LIST ── */
+.cal-event-row{padding:5px 7px;border-bottom:1px solid var(--mid);cursor:pointer;background:var(--white);}
+.cal-event-row:hover{background:var(--lt-yellow);}
+.cal-event-row.selected{background:var(--blue);color:var(--white);}
+.cal-event-row.selected .cal-event-meta{color:#aaa;}
+.cal-event-title{font-family:var(--font-main);font-size:17px;}
+.cal-event-meta{font-family:var(--font-mono);font-size:9px;color:#555;}
 
 /* ── MINI CALENDAR ── */
-.mini-cal{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:6px;margin-bottom:8px;}
-.cal-header{font-family:var(--font-main);font-size:20px;text-align:center;margin-bottom:6px;color:var(--blue);}
-.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:1px;text-align:center;font-family:var(--font-mono);font-size:10px;}
-.cal-day-head{color:var(--blue);font-weight:bold;padding:2px 0;}
-.cal-day{padding:3px 2px;}
+.mini-cal{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:4px;margin-bottom:6px;}
+.cal-header{font-family:var(--font-main);font-size:16px;text-align:center;margin-bottom:4px;color:var(--blue);}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:1px;text-align:center;font-family:var(--font-mono);font-size:9px;}
+.cal-day-head{color:var(--blue);font-weight:bold;padding:1px 0;}
+.cal-day{padding:2px 1px;}
 .cal-day.today{background:var(--blue);color:var(--white);}
 .cal-day.event-day{background:var(--yellow);color:var(--black);font-weight:bold;border:1px solid var(--shadow);}
 .cal-day.other-month{color:#999;}
 
 /* ── CONTACTS ── */
-.contact-item{display:flex;align-items:center;gap:6px;padding:4px 6px;border-bottom:1px solid var(--mid);font-family:var(--font-mono);font-size:12px;cursor:pointer;}
+.contact-item{display:flex;align-items:center;gap:6px;padding:4px 6px;border-bottom:1px solid var(--mid);font-family:var(--font-mono);font-size:11px;cursor:pointer;}
 .contact-item:hover,.contact-item.selected-contact{background:var(--blue);color:var(--white);}
 .contact-item:hover .member-dot,.contact-item.selected-contact .member-dot{background:var(--yellow);}
 
 /* ── STEP DOTS ── */
-.step-dots{display:flex;gap:6px;justify-content:center;margin-bottom:8px;}
-.step-dot{width:8px;height:8px;background:var(--shadow);border-radius:50%;}
+.step-dots{display:flex;gap:6px;justify-content:center;margin-bottom:6px;}
+.step-dot{width:7px;height:7px;background:var(--shadow);border-radius:50%;}
 .step-dot.done{background:var(--blue2);}
 .step-dot.current{background:var(--blue);border:2px solid var(--dark);}
 
-/* ── TICKER ── */
-.ticker{background:var(--blue);color:var(--yellow);font-family:var(--font-main);font-size:14px;padding:2px 0;overflow:hidden;white-space:nowrap;flex-shrink:0;}
-.ticker-inner{display:inline-block;animation:scroll-left 18s linear infinite;padding-left:100%;}
-@keyframes scroll-left{from{transform:translateX(0)}to{transform:translateX(-100%)}}
-
-/* ── ECO SWITCHER BAR ── */
-.eco-switcher{background:var(--blue);padding:3px 8px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;z-index:2;}
-.eco-switcher-name{font-family:var(--font-main);font-size:14px;color:var(--yellow);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.eco-switcher-btn{font-family:var(--font-main);font-size:12px;color:var(--yellow);background:transparent;border:1px solid rgba(255,255,255,.3);padding:1px 6px;cursor:pointer;white-space:nowrap;}
-.eco-switcher-btn:hover{background:rgba(255,255,255,.15);}
-
-/* ── ERROR HINT ── */
-.rsvp-error-hint{background:var(--lt-red);border:1px solid var(--red);padding:6px 8px;font-family:var(--font-mono);font-size:10px;color:var(--red);margin-bottom:8px;line-height:1.5;}
+/* ── ECO CARDS (Ecosystems screen) ── */
+.eco-card{background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);margin-bottom:6px;padding:6px 8px;display:flex;align-items:center;gap:8px;}
+.eco-card.active{background:var(--lt-green);}
+.eco-card-body{flex:1;min-width:0;}
+.eco-card-name{font-family:var(--font-main);font-size:18px;color:var(--blue);}
+.eco-card-code{font-family:var(--font-mono);font-size:10px;color:#555;}
+.eco-card-btns{display:flex;gap:4px;flex-shrink:0;}
+.eco-active-badge{font-family:var(--font-mono);font-size:9px;color:var(--green);letter-spacing:1px;padding:2px 4px;border:1px solid var(--green);}
 
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
 .blink{animation:blink 1s step-end infinite;}
@@ -957,112 +1256,61 @@ img,video{max-width:100%;}
 <body>
 
 <!-- ════════════════════════════════════════════
-     FIRESTORE SECURITY RULES
-     ════════════════════════════════════════════
-     HOW TO APPLY:
-       1. Go to https://console.firebase.google.com
-       2. Select your project → Firestore Database → Rules tab
-       3. Delete everything already there
-       4. Paste the rules below and click "Publish"
+     FIRESTORE SECURITY RULES — Firebase Console → Firestore → Rules
      ════════════════════════════════════════════
 
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-
-    // ── USERS ─────────────────────────────────────────────────────────────
-    // Each user document is stored under their Firebase anonymous uid.
-    // Users can only read and write their own document — no one else can
-    // view or modify another user's display name, active ecosystem, or
-    // full list of ecosystems they belong to.
     match /users/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
-
-    // ── ECOSYSTEMS ────────────────────────────────────────────────────────
-    // Any signed-in user can read any ecosystem document. This is required
-    // so that a user can look up an ecosystem by its 6-character code when
-    // joining or connecting to a friend's group.
-    // Any signed-in user can create a new ecosystem document.
-    // Editing or deleting the ecosystem document itself is not permitted —
-    // membership is managed through the members subcollection below.
     match /ecosystems/{ecoCode} {
       allow read:   if request.auth != null;
       allow create: if request.auth != null;
-
-      // ── MEMBERS subcollection ──────────────────────────────────────────
-      // Any signed-in user can read the full members list for any ecosystem.
-      // This is needed to display the member roster on the home screen and
-      // populate the recipient picker when composing an invite.
-      // A user may only write (add, update, or delete) their OWN member
-      // entry — identified by their uid matching the document id. This
-      // covers both joining an ecosystem and leaving it.
       match /members/{memberId} {
         allow read:  if request.auth != null;
         allow write: if request.auth != null && request.auth.uid == memberId;
       }
     }
-
-    // ── INVITES ───────────────────────────────────────────────────────────
-    // Invite documents are private. Only the sender and the intended
-    // recipient are permitted to read a given invite.
     match /invites/{inviteId} {
-
-      // CREATE: only a signed-in user can create an invite, and the
-      // fromUid field in the new document must equal their own uid.
-      // This prevents anyone from spoofing a different sender identity.
-      allow create: if request.auth != null
-                    && request.auth.uid == request.resource.data.fromUid;
-
-      // READ: only the sender (fromUid) or the recipient (toUid) may
-      // read the invite document. All other users are denied access.
-      allow read: if request.auth != null
-                  && (request.auth.uid == resource.data.fromUid
-                   || request.auth.uid == resource.data.toUid);
-
-      // UPDATE: only the recipient (toUid) may update an invite, and
-      // they are strictly limited to changing the 'rsvp' field alone.
-      // The diff().affectedKeys().hasOnly(['rsvp']) check is what makes
-      // the YES / NO buttons work — and also ensures the recipient cannot
-      // tamper with any other field such as the title, date, or location.
-      allow update: if request.auth != null
-                    && request.auth.uid == resource.data.toUid
-                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rsvp']);
+      allow create: if request.auth != null && request.auth.uid == request.resource.data.fromUid;
+      allow read:   if request.auth != null && (request.auth.uid == resource.data.fromUid || request.auth.uid == resource.data.toUid);
+      allow update: if request.auth != null && request.auth.uid == resource.data.toUid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rsvp']);
     }
-
+    match /notifications/{notifId} {
+      // Anyone signed in can create a notification (RSVP response for sender)
+      allow create: if request.auth != null;
+      // Only the recipient can read and update (mark as read)
+      allow read, update: if request.auth != null && request.auth.uid == resource.data.recipientUid;
+    }
   }
 }
-═══════════════════════════════════════════════ -->
+════════════════════════════════════════════ -->
 
 <div class="app-wrapper">
 <div class="phone-shell">
-  <div class="phone-notch">
-    <div class="notch-cam"></div>
-    <div class="notch-speaker"></div>
-    <div class="notch-cam"></div>
-  </div>
-
+  <div class="phone-notch"></div>
   <div class="phone-screen">
 
     <!-- BOOT -->
     <div class="screen active" id="screen-boot">
-      <div class="boot-logo">ECO<br>INVITE</div>
-      <div class="boot-sub">v2.1 · RETRO RSVP SYSTEM</div>
+      <div class="boot-logo" onclick="handleLogoTap()">ECO<br>INVITE</div>
+      <div class="boot-sub">v2.2 · RETRO RSVP SYSTEM</div>
       <div class="boot-bar-wrap"><div class="boot-bar-fill" id="boot-fill"></div></div>
       <div class="boot-status" id="boot-status">Loading...</div>
     </div>
 
     <!-- WELCOME -->
     <div class="screen" id="screen-welcome">
-      <div class="ticker"><span class="ticker-inner">★ WELCOME TO ECOINVITE ★ THE RETRO RSVP SYSTEM ★ SHARE YOUR CODE ★ BUILD YOUR ECOSYSTEM ★&nbsp;</span></div>
+      <div class="ticker"><span class="ticker-inner">★ WELCOME TO ECOINVITE ★ THE RETRO RSVP SYSTEM ★ BUILD YOUR ECOSYSTEM ★ SEND INVITES ★&nbsp;</span></div>
       <div class="welcome-inner">
         <div class="win">
           <div class="win-title"><span>📬</span> EcoInvite — Welcome<div class="win-btns"><div class="wbtn">_</div><div class="wbtn">□</div><div class="wbtn">✕</div></div></div>
           <div class="win-body">
-            <div class="app-logo-big">📬 ECOINVITE</div>
+            <div class="app-logo-big" onclick="handleLogoTap()">📬 ECOINVITE</div>
             <div class="app-tagline">INVITE PEOPLE. BUILD YOUR CIRCLE.</div>
             <div class="divider"></div>
-            <div style="font-family:var(--font-main);font-size:18px;margin-bottom:10px;color:#444;">► CHOOSE AN OPTION:</div>
             <button class="btn full big" onclick="showCreateEco()">⊕ CREATE YOUR ECOSYSTEM</button>
             <button class="btn full big" onclick="showJoinEco()">► JOIN AN ECOSYSTEM</button>
           </div>
@@ -1071,96 +1319,63 @@ service cloud.firestore {
       </div>
     </div>
 
-    <!-- HOME -->
+    <!-- HOME / DASHBOARD -->
     <div class="screen" id="screen-home">
-      <!-- Ecosystem switcher bar -->
-      <div class="eco-switcher">
-        <span class="eco-switcher-name">🌐 <span id="eco-switcher-label">My Eco</span></span>
-        <button class="eco-switcher-btn" onclick="showSwitchEco()">⇄ SWITCH</button>
-        <button class="eco-switcher-btn" onclick="showLeaveEco()" style="margin-left:4px;color:#ffaaaa;">✕ LEAVE</button>
-      </div>
-
       <div class="ticker"><span class="ticker-inner" id="home-ticker">★ YOUR ECOSYSTEM IS ACTIVE ★&nbsp;</span></div>
 
-      <div class="win" style="margin-top:6px;">
+      <!-- Dashboard -->
+      <div class="win" style="margin-top:5px;">
         <div class="win-title"><span>🌐</span> <span id="eco-name-display">My Eco</span> — Dashboard<div class="win-btns"><div class="wbtn">_</div><div class="wbtn">□</div><div class="wbtn">✕</div></div></div>
-        <div class="win-body">
-          <div class="eco-badge">🟢 <span id="home-eco-code-display">ECO: ------</span> &nbsp;·&nbsp; <span id="home-member-count">1 member</span> &nbsp;·&nbsp; <span id="eco-count-badge" style="color:#555;">1 ecosystem</span></div>
-          <div style="font-family:var(--font-main);font-size:16px;color:#444;margin-bottom:4px;">► MEMBERS:</div>
-          <div class="inset" id="member-list-home" style="max-height:80px;overflow-y:auto;"><span style="color:#888;font-family:var(--font-mono);font-size:11px;">Loading...</span></div>
-          <button class="btn full" onclick="showInviteCode()">📋 Share Ecosystem Code</button>
-          <button class="btn full" onclick="showAddMember()">➕ Add Member by Code</button>
+        <div class="win-body-sm">
+          <div class="eco-badge">🟢 <span id="home-eco-code-display">ECO: ------</span> &nbsp;·&nbsp; <span id="home-member-count">1 member</span></div>
+          <div class="inset" id="member-list-home" style="max-height:60px;overflow-y:auto;margin-bottom:4px;"><span style="color:#888;font-size:11px;">Loading...</span></div>
+          <div style="display:flex;gap:4px;">
+            <button class="btn" style="flex:1;font-size:14px;" onclick="showInviteCode()">📋 Share Code</button>
+            <button class="btn" style="flex:1;font-size:14px;" onclick="showAddMember()">➕ Add Member</button>
+          </div>
         </div>
       </div>
 
+      <!-- New Invite -->
       <div class="win">
         <div class="win-title"><span>✉️</span> New Invite</div>
-        <div class="win-body"><button class="btn full big" onclick="goToSendInvite()">✉️ SEND AN INVITE</button></div>
+        <div class="win-body-sm">
+          <button class="btn full big" onclick="goToSendInvite()">✉️ SEND AN INVITE</button>
+        </div>
       </div>
 
+      <!-- Notifications -->
       <div class="win">
-        <div class="win-title"><span>📥</span> Pending Invites <span class="blink" style="font-size:12px;color:var(--red);">●</span></div>
-        <div class="win-body">
-          <div id="incoming-invites-list"><div style="font-family:var(--font-mono);font-size:12px;color:#888;text-align:center;padding:8px;">No pending invites.</div></div>
+        <div class="win-title"><span>🔔</span> Notifications <span class="blink" style="font-size:11px;color:var(--yellow);">●</span></div>
+        <div class="win-body-sm" style="padding:0;">
+          <div id="notifications-list" style="max-height:110px;overflow-y:auto;">
+            <div style="font-family:var(--font-mono);font-size:11px;color:#888;text-align:center;padding:8px;">No notifications.</div>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- SEND -->
-    <div class="screen" id="screen-send">
-      <div class="win" style="margin-top:8px;">
-        <div class="win-title"><span>✉️</span> Compose Invite<div class="win-btns"><div class="wbtn" onclick="showMainTab('screen-home','tab-home')">✕</div></div></div>
-        <div class="win-body">
-          <div class="step-dots">
-            <div class="step-dot current" id="dot1"></div>
-            <div class="step-dot" id="dot2"></div>
-            <div class="step-dot" id="dot3"></div>
-          </div>
-          <div id="send-step-1">
-            <div style="font-family:var(--font-main);font-size:18px;margin-bottom:6px;">► SELECT RECIPIENT:</div>
-            <div class="inset" id="contact-picker" style="padding:4px;max-height:120px;overflow-y:auto;"><div style="font-family:var(--font-mono);font-size:11px;color:#888;padding:4px;">No members yet.</div></div>
-            <div style="font-family:var(--font-mono);font-size:11px;color:#666;margin-bottom:8px;">Selected: <span id="selected-recipient-name">—</span></div>
-            <button class="btn full" onclick="sendStep(2)">NEXT ►</button>
-          </div>
-          <div id="send-step-2" style="display:none;">
-            <div class="field-row"><label>📋 EVENT TITLE:</label><input type="text" id="inv-title" placeholder="e.g. Birthday Bash" maxlength="40"></div>
-            <div class="field-row"><label>📅 DATE:</label><input type="date" id="inv-date"></div>
-            <div class="field-row"><label>🕐 TIME:</label><input type="time" id="inv-time"></div>
-            <div class="field-row"><label>📍 LOCATION:</label><input type="text" id="inv-location" placeholder="e.g. 123 Main St" maxlength="80"></div>
-            <div class="field-row"><label>📝 DETAILS:</label><textarea id="inv-details" rows="3" placeholder="Tell them more..."></textarea></div>
-            <div style="display:flex;gap:6px;">
-              <button class="btn" onclick="sendStep(1)" style="flex:1;">◄ BACK</button>
-              <button class="btn" onclick="sendStep(3)" style="flex:2;">PREVIEW ►</button>
-            </div>
-          </div>
-          <div id="send-step-3" style="display:none;">
-            <div style="font-family:var(--font-main);font-size:18px;margin-bottom:6px;">► PREVIEW:</div>
-            <div class="invite-card"><div class="invite-card-stamp pending">DRAFT</div><div class="invite-card-title" id="prev-title">—</div><div id="prev-details" style="line-height:1.7;"></div></div>
-            <div style="display:flex;gap:6px;">
-              <button class="btn" onclick="sendStep(2)" style="flex:1;">◄ BACK</button>
-              <button class="btn big" onclick="sendInvite()" style="flex:2;background:var(--lt-green);">📤 SEND!</button>
-            </div>
+    <!-- INBOX -->
+    <div class="screen" id="screen-inbox">
+      <div class="win" style="margin-top:6px;">
+        <div class="win-title"><span>📥</span> Inbox — All Invites<div class="win-btns"><div class="wbtn" onclick="showMainTab('screen-home','tab-home')">✕</div></div></div>
+        <div style="padding:0;">
+          <div id="inbox-list">
+            <div style="font-family:var(--font-mono);font-size:11px;color:#888;text-align:center;padding:12px;">No invites yet.</div>
           </div>
         </div>
-        <div class="status-bar"><div class="status-panel" id="send-status">Select a recipient to begin.</div></div>
       </div>
     </div>
 
-    <!-- RECEIVE -->
+    <!-- RECEIVE INVITE (detail) -->
     <div class="screen" id="screen-receive">
-      <div class="win" style="margin-top:8px;">
-        <div class="win-title"><span>📥</span> Incoming Invite<div class="win-btns"><div class="wbtn" onclick="showMainTab('screen-home','tab-home')">✕</div></div></div>
+      <div class="win" style="margin-top:6px;">
+        <div class="win-title"><span>📥</span> Incoming Invite<div class="win-btns"><div class="wbtn" onclick="showMainTab('screen-inbox','tab-inbox')">✕</div></div></div>
         <div class="win-body">
-          <div class="invite-card"><div class="invite-card-stamp pending" id="receive-stamp">PENDING</div><div class="invite-card-title" id="rec-title">—</div><div id="rec-details" style="line-height:1.8;"></div></div>
-
-          <!-- RSVP error hint — shown if Firestore rules block the update -->
-          <div class="rsvp-error-hint" id="rsvp-error-hint" style="display:none;">
-            ⚠ RSVP failed — Firestore rules may need updating.<br>
-            Go to Firebase Console → Firestore → Rules and paste the rules from the README.
-          </div>
-
-          <div style="font-family:var(--font-main);font-size:18px;margin-bottom:6px;">► YOUR RSVP:</div>
-          <div style="display:flex;gap:8px;margin-bottom:8px;">
+          <div class="invite-card"><div class="invite-card-stamp pending" id="receive-stamp">PENDING</div><div class="invite-card-title" id="rec-title">—</div><div id="rec-details" style="line-height:1.7;"></div></div>
+          <div class="rsvp-error-hint" id="rsvp-error-hint" style="display:none;">⚠ RSVP failed — update Firestore rules.</div>
+          <div style="font-family:var(--font-main);font-size:16px;margin-bottom:5px;">► YOUR RSVP:</div>
+          <div style="display:flex;gap:6px;margin-bottom:6px;">
             <button class="btn big" id="rsvp-yes-btn" onclick="doRsvp('yes')" style="flex:1;justify-content:center;">✔ YES</button>
             <button class="btn big" id="rsvp-no-btn"  onclick="doRsvp('no')"  style="flex:1;justify-content:center;">✘ NO</button>
           </div>
@@ -1170,42 +1385,102 @@ service cloud.firestore {
       </div>
     </div>
 
-    <!-- CALENDAR -->
-    <div class="screen" id="screen-calendar">
-      <div class="win" style="margin-top:8px;">
-        <div class="win-title"><span>📅</span> Calendar &amp; Countdown</div>
+    <!-- SEND INVITE -->
+    <div class="screen" id="screen-send">
+      <div class="win" style="margin-top:6px;">
+        <div class="win-title"><span>✉️</span> Compose Invite<div class="win-btns"><div class="wbtn" onclick="showMainTab('screen-home','tab-home')">✕</div></div></div>
         <div class="win-body">
-          <div style="font-family:var(--font-main);font-size:18px;margin-bottom:6px;">► NEXT EVENT COUNTDOWN:</div>
-          <div id="no-events-msg" style="font-family:var(--font-mono);font-size:11px;color:#888;margin-bottom:8px;">No upcoming events. Send or accept an invite!</div>
-          <div id="countdown-area" style="display:none;">
-            <div class="inset" style="font-family:var(--font-main);font-size:18px;margin-bottom:4px;" id="cd-event-name">—</div>
-            <div class="countdown-grid">
-              <div class="cd-block"><span class="cd-num" id="cd-days">00</span><span class="cd-label">DAYS</span></div>
-              <div class="cd-block"><span class="cd-num" id="cd-hours">00</span><span class="cd-label">HOURS</span></div>
-              <div class="cd-block"><span class="cd-num" id="cd-mins">00</span><span class="cd-label">MINS</span></div>
-              <div class="cd-block"><span class="cd-num" id="cd-secs">00</span><span class="cd-label">SECS</span></div>
+          <div class="step-dots">
+            <div class="step-dot current" id="dot1"></div>
+            <div class="step-dot" id="dot2"></div>
+            <div class="step-dot" id="dot3"></div>
+          </div>
+          <div id="send-step-1">
+            <div style="font-family:var(--font-main);font-size:16px;margin-bottom:5px;">► SELECT RECIPIENT:</div>
+            <div class="inset" id="contact-picker" style="padding:3px;max-height:110px;overflow-y:auto;"></div>
+            <div style="font-family:var(--font-mono);font-size:10px;color:#666;margin-bottom:6px;">Selected: <span id="selected-recipient-name">—</span></div>
+            <button class="btn full" onclick="sendStep(2)">NEXT ►</button>
+          </div>
+          <div id="send-step-2" style="display:none;">
+            <div class="field-row"><label>📋 TITLE:</label><input type="text" id="inv-title" placeholder="e.g. Birthday Bash" maxlength="40"></div>
+            <div class="field-row"><label>📅 DATE:</label><input type="date" id="inv-date"></div>
+            <div class="field-row"><label>🕐 TIME:</label><input type="time" id="inv-time"></div>
+            <div class="field-row"><label>📍 LOCATION:</label><input type="text" id="inv-location" placeholder="e.g. 123 Main St" maxlength="80"></div>
+            <div class="field-row"><label>📝 DETAILS:</label><textarea id="inv-details" rows="2" placeholder="Tell them more..."></textarea></div>
+            <div style="display:flex;gap:5px;">
+              <button class="btn" onclick="sendStep(1)" style="flex:1;">◄ BACK</button>
+              <button class="btn" onclick="sendStep(3)" style="flex:2;">PREVIEW ►</button>
             </div>
           </div>
+          <div id="send-step-3" style="display:none;">
+            <div class="invite-card"><div class="invite-card-stamp pending">DRAFT</div><div class="invite-card-title" id="prev-title">—</div><div id="prev-details" style="line-height:1.6;"></div></div>
+            <div style="display:flex;gap:5px;">
+              <button class="btn" onclick="sendStep(2)" style="flex:1;">◄ BACK</button>
+              <button class="btn big" onclick="sendInvite()" style="flex:2;background:var(--lt-green);">📤 SEND!</button>
+            </div>
+          </div>
+        </div>
+        <div class="status-bar"><div class="status-panel" id="send-status">Select a recipient to begin.</div></div>
+      </div>
+    </div>
+
+    <!-- EVENTS / CALENDAR -->
+    <div class="screen" id="screen-calendar">
+      <div class="win" style="margin-top:6px;">
+        <div class="win-title"><span>📅</span> Events &amp; Countdown</div>
+        <div class="win-body">
+
+          <!-- Timer — Win98 style segmented blocks -->
+          <div id="no-events-msg" style="font-family:var(--font-mono);font-size:11px;color:#888;margin-bottom:6px;">No upcoming events. RSVP to invites to see them here!</div>
+          <div id="timer-wrap" style="display:none;margin-bottom:6px;">
+            <div style="font-family:var(--font-main);font-size:14px;color:#444;margin-bottom:3px;">► COUNTDOWN:</div>
+            <div class="inset" style="padding:4px 6px;">
+              <div class="timer-seg-row">
+                <div class="timer-seg"><span class="seg-num" id="cd-d">00</span><span class="seg-lbl">DAYS</span></div>
+                <div class="timer-seg-sep">:</div>
+                <div class="timer-seg"><span class="seg-num" id="cd-h">00</span><span class="seg-lbl">HRS</span></div>
+                <div class="timer-seg-sep">:</div>
+                <div class="timer-seg"><span class="seg-num" id="cd-m">00</span><span class="seg-lbl">MIN</span></div>
+                <div class="timer-seg-sep">:</div>
+                <div class="timer-seg"><span class="seg-num" id="cd-s">00</span><span class="seg-lbl">SEC</span></div>
+              </div>
+            </div>
+          </div>
+
           <div class="divider"></div>
-          <div style="font-family:var(--font-main);font-size:18px;margin-bottom:6px;">► CALENDAR:</div>
+          <div style="font-family:var(--font-main);font-size:14px;color:#444;margin-bottom:3px;">► SELECT EVENT:</div>
+          <div class="inset" id="cal-event-list" style="padding:0;max-height:130px;overflow-y:auto;"></div>
+
+          <div class="divider"></div>
+          <div style="font-family:var(--font-main);font-size:14px;color:#444;margin-bottom:3px;">► CALENDAR:</div>
           <div class="mini-cal" id="mini-cal"></div>
-          <div class="divider"></div>
-          <div style="font-family:var(--font-main);font-size:18px;margin-bottom:6px;">► ALL EVENTS:</div>
-          <div id="all-events-list" class="inset" style="max-height:120px;overflow-y:auto;"><span style="font-family:var(--font-mono);font-size:11px;color:#888;">No events yet.</span></div>
         </div>
       </div>
     </div>
 
-    <!-- TASKBAR -->
+    <!-- ECOSYSTEMS SCREEN -->
+    <div class="screen" id="screen-ecos">
+      <div class="win" style="margin-top:6px;">
+        <div class="win-title"><span>🌐</span> My Ecosystems</div>
+        <div class="win-body">
+          <div id="ecos-list"></div>
+          <div class="divider"></div>
+          <button class="btn full" onclick="showCreateEco()">⊕ Create New Ecosystem</button>
+          <button class="btn full" onclick="showJoinEco()">► Join Another Ecosystem</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- TASKBAR — ECO · INBOX · EVENTS · ECOS -->
     <div class="taskbar" id="main-taskbar" style="display:none;">
       <button class="tab-btn" id="tab-home"     onclick="showMainTab('screen-home','tab-home')"><span class="tab-icon">🌐</span><span class="tab-label">ECO</span></button>
-      <button class="tab-btn" id="tab-send"     onclick="showMainTab('screen-send','tab-send')"><span class="tab-icon">✉️</span><span class="tab-label">SEND</span></button>
-      <button class="tab-btn" id="tab-receive"  onclick="showReceiveTab()"><span class="tab-icon">📥</span><span class="tab-label">INBOX</span></button>
+      <button class="tab-btn" id="tab-inbox"    onclick="showMainTab('screen-inbox','tab-inbox');refreshInboxScreen()"><span class="tab-icon">📥</span><span class="tab-label">INBOX</span></button>
       <button class="tab-btn" id="tab-calendar" onclick="showMainTab('screen-calendar','tab-calendar')"><span class="tab-icon">📅</span><span class="tab-label">EVENTS</span></button>
+      <button class="tab-btn" id="tab-ecos"     onclick="showMainTab('screen-ecos','tab-ecos')"><span class="tab-icon">🔀</span><span class="tab-label">ECOS</span></button>
       <div class="taskbar-clock" id="clock">--:--<br>--/--</div>
     </div>
 
-    <!-- POPUP -->
+    <!-- MAIN POPUP -->
     <div class="popup-overlay" id="popup">
       <div class="popup-win">
         <div class="win-title"><span id="popup-title-icon">📬</span><span id="popup-title">Message</span><div class="win-btns"><div class="wbtn" onclick="closePopup()">✕</div></div></div>
@@ -1214,19 +1489,86 @@ service cloud.firestore {
           <div class="popup-msg" id="popup-msg">Hello!</div>
           <div id="popup-loading" style="display:none;"><div class="popup-loading loading-dots">Working</div></div>
           <div id="popup-code-wrap" style="display:none;">
-            <div style="font-family:var(--font-mono);font-size:11px;color:#666;margin-bottom:4px;">Your ecosystem code:</div>
+            <div style="font-family:var(--font-mono);font-size:10px;color:#666;margin-bottom:3px;">Ecosystem code:</div>
             <div class="popup-code" id="popup-code">------</div>
-            <div style="font-family:var(--font-mono);font-size:11px;color:#666;margin-bottom:8px;">Share this with friends!</div>
+            <div style="font-family:var(--font-mono);font-size:10px;color:#666;margin-bottom:6px;">Share with friends!</div>
           </div>
-          <div id="popup-input-wrap" style="display:none;margin-bottom:10px;">
+          <div id="popup-input-wrap" style="display:none;margin-bottom:8px;">
             <div class="field-row" style="text-align:left;"><label id="popup-input-label">Enter code:</label><input type="text" id="popup-input" placeholder="" maxlength="8"></div>
           </div>
-          <div id="popup-name-input-wrap" style="display:none;margin-bottom:10px;">
+          <div id="popup-name-input-wrap" style="display:none;margin-bottom:8px;">
             <div class="field-row" style="text-align:left;"><label>Your name:</label><input type="text" id="popup-name-input" placeholder="Enter your name..." maxlength="30"></div>
             <div class="field-row" style="text-align:left;"><label id="popup-eco-name-label">Ecosystem name:</label><input type="text" id="popup-eco-name-input" placeholder="e.g. The Crew" maxlength="30"></div>
           </div>
           <div class="popup-btns" id="popup-btns"><button class="btn" onclick="closePopup()">OK</button></div>
         </div>
+      </div>
+    </div>
+
+    <!-- RSVP NOTIFICATION POPUP -->
+    <div class="notif-popup-overlay" id="notif-popup">
+      <div class="notif-popup-win">
+        <span class="notif-popup-icon">🔔</span>
+        <div class="notif-popup-msg" id="notif-popup-msg">Someone responded to your invite.</div>
+        <div class="notif-popup-time" id="notif-popup-time"></div>
+        <button class="btn notif-popup-close" onclick="closeNotifPopup()">✕ CLOSE &amp; DISMISS</button>
+      </div>
+    </div>
+
+    <!-- ADMIN LOGIN -->
+    <div class="admin-login-overlay" id="admin-login">
+      <div class="admin-login-box">
+        <div class="admin-login-title">ADMIN ACCESS</div>
+        <div class="admin-field"><label>USERNAME</label><input type="text" id="admin-user-input" autocomplete="off" spellcheck="false"></div>
+        <div class="admin-field"><label>PASSWORD</label><input type="password" id="admin-pass-input"></div>
+        <div class="admin-btns">
+          <button class="admin-login-btn" onclick="closeAdminLogin()">CANCEL</button>
+          <button class="admin-login-btn primary" onclick="submitAdminLogin()">LOGIN</button>
+        </div>
+        <div class="admin-msg" id="admin-login-msg"></div>
+      </div>
+    </div>
+
+    <!-- ADMIN PANEL -->
+    <div class="admin-panel-overlay" id="admin-panel">
+      <div class="admin-header">
+        <div class="admin-header-title">⬛ ECOINVITE ADMIN</div>
+        <div class="admin-header-status" id="admin-status">—</div>
+        <button class="admin-close-btn" onclick="closeAdminPanel()">✕ EXIT</button>
+      </div>
+      <div class="admin-body">
+
+        <!-- Stats -->
+        <div>
+          <div class="admin-section-title">OVERVIEW</div>
+          <div class="admin-stats">
+            <div class="admin-stat"><span class="admin-stat-num" id="admin-eco-count">—</span><span class="admin-stat-label">ECOSYSTEMS</span></div>
+            <div class="admin-stat"><span class="admin-stat-num" id="admin-user-count">—</span><span class="admin-stat-label">USERS</span></div>
+            <div class="admin-stat"><span class="admin-stat-num" id="admin-invite-count">—</span><span class="admin-stat-label">INVITES</span></div>
+            <div class="admin-stat"><span class="admin-stat-num" id="admin-notif-count">—</span><span class="admin-stat-label">NOTIFICATIONS</span></div>
+          </div>
+        </div>
+
+        <!-- Ecosystems -->
+        <div>
+          <div class="admin-section-title">ECOSYSTEMS</div>
+          <div id="admin-eco-list"><div class="admin-empty">Loading...</div></div>
+        </div>
+
+        <!-- Invites -->
+        <div>
+          <div class="admin-section-title">INVITES</div>
+          <div id="admin-invite-list"><div class="admin-empty">Loading...</div></div>
+        </div>
+
+        <!-- Actions -->
+        <div>
+          <div class="admin-section-title">ACTIONS</div>
+          <button class="admin-refresh-btn" onclick="adminRefresh()">↻ REFRESH DATA</button>
+          <div style="height:6px;"></div>
+          <button class="admin-clear-btn" onclick="adminClearAll()">⚠ CLEAR ALL DATA (TESTING)</button>
+        </div>
+
       </div>
     </div>
 
