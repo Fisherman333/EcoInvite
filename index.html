@@ -10,16 +10,11 @@
 <title>EcoInvite</title>
 
 <script type="module">
-// ═══════════════════════════════════════════════════════════
-//  🔥 PASTE YOUR FIREBASE CONFIG VALUES HERE
-//  Firebase Console → Project Settings → Your Apps → Web App
-// ═══════════════════════════════════════════════════════════
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
-  getFirestore, doc, getDoc, setDoc, updateDoc,
-  collection, addDoc, onSnapshot, query, where,
-  serverTimestamp
+  getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc,
+  collection, addDoc, onSnapshot, query, where, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const FIREBASE_CONFIG = {
@@ -31,62 +26,51 @@ const FIREBASE_CONFIG = {
   appId:             "1:263863833402:web:4339d663cf47c974cbb603"
 };
 
-// ─────────────────────────────────────────
-//  INIT FIREBASE
-// ─────────────────────────────────────────
 const app  = initializeApp(FIREBASE_CONFIG);
 const auth = getAuth(app);
 const db   = getFirestore(app);
 
 // ─────────────────────────────────────────
-//  LOCAL STATE
+//  STATE
 // ─────────────────────────────────────────
 const state = {
   uid:               null,
   myName:            '',
-  ecoCode:           '',
+  ecoCode:           '',          // active ecosystem
   ecoName:           '',
+  allEcos:           [],          // [{ecoCode, ecoName}] — all ecosystems this user belongs to
   members:           [],
   receivedInvites:   [],
   sentInvites:       [],
   activeInvite:      null,
   selectedRecipient: null,
-  unsubscribeInvites:  null,
-  unsubscribeMembers:  null,
+  unsubInvites:      null,
+  unsubMembers:      null,
+  unsubSent:         null,
 };
 
 // ─────────────────────────────────────────
-//  BOOT SEQUENCE
+//  BOOT
 // ─────────────────────────────────────────
-const bootMessages = [
-  'Initializing EcoInvite v2.0...',
-  'Connecting to Firebase...',
-  'Authenticating session...',
-  'Loading ecosystem data...',
-  'Ready.',
-];
+const bootMsgs = ['Initializing EcoInvite v2.0...','Connecting to Firebase...','Authenticating session...','Loading ecosystem data...','Ready.'];
 let bootIdx = 0;
 const fillEl   = document.getElementById('boot-fill');
 const statusEl = document.getElementById('boot-status');
 
 function bootStep(msg) {
   if (statusEl) statusEl.textContent = msg;
-  if (fillEl)   fillEl.style.width   = ((bootIdx + 1) / bootMessages.length * 100) + '%';
+  if (fillEl)   fillEl.style.width = ((bootIdx + 1) / bootMsgs.length * 100) + '%';
   bootIdx++;
 }
-
 (function runBoot() {
-  const interval = setInterval(() => {
-    if (bootIdx < bootMessages.length - 1) {
-      bootStep(bootMessages[bootIdx]);
-    } else {
-      clearInterval(interval);
-    }
+  const iv = setInterval(() => {
+    if (bootIdx < bootMsgs.length - 1) bootStep(bootMsgs[bootIdx]);
+    else clearInterval(iv);
   }, 500);
 })();
 
 // ─────────────────────────────────────────
-//  AUTH — sign in anonymously, restore session
+//  AUTH
 // ─────────────────────────────────────────
 onAuthStateChanged(auth, async (user) => {
   if (!user) {
@@ -95,24 +79,21 @@ onAuthStateChanged(auth, async (user) => {
     });
     return;
   }
-
   state.uid = user.uid;
   bootStep('Ready.');
   if (fillEl) fillEl.style.width = '100%';
 
+  // Load user profile
   const userDoc = await getDoc(doc(db, 'users', state.uid));
-
-  setTimeout(() => {
+  setTimeout(async () => {
     if (userDoc.exists()) {
-      const data    = userDoc.data();
-      state.myName  = data.name;
-      state.ecoCode = data.ecoCode || '';
-      state.ecoName = data.ecoName || '';
-      if (state.ecoCode) {
-        enterApp();
-      } else {
-        showScreen('screen-welcome');
-      }
+      const data     = userDoc.data();
+      state.myName   = data.name;
+      state.ecoCode  = data.ecoCode  || '';
+      state.ecoName  = data.ecoName  || '';
+      state.allEcos  = data.allEcos  || (state.ecoCode ? [{ ecoCode: state.ecoCode, ecoName: state.ecoName }] : []);
+      if (state.ecoCode) enterApp();
+      else showScreen('screen-welcome');
     } else {
       showScreen('screen-welcome');
     }
@@ -128,24 +109,16 @@ function genCode(len = 6) {
   for (let i = 0; i < len; i++) c += chars[Math.floor(Math.random() * chars.length)];
   return c;
 }
-
-function formatDate(dateStr) {
-  if (!dateStr) return '—';
-  const d = new Date(dateStr + 'T00:00:00');
-  return d.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' });
+function formatDate(d) {
+  if (!d) return '—';
+  return new Date(d + 'T00:00:00').toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' });
 }
-
-function formatTime(timeStr) {
-  if (!timeStr) return '—';
-  const [h, m] = timeStr.split(':').map(Number);
-  const ampm = h >= 12 ? 'PM' : 'AM';
-  return `${h % 12 || 12}:${String(m).padStart(2,'0')} ${ampm}`;
+function formatTime(t) {
+  if (!t) return '—';
+  const [h, m] = t.split(':').map(Number);
+  return `${h % 12 || 12}:${String(m).padStart(2,'0')} ${h >= 12 ? 'PM' : 'AM'}`;
 }
-
-function setStatus(id, text) {
-  const el = document.getElementById(id);
-  if (el) el.textContent = text;
-}
+function setStatus(id, text) { const el = document.getElementById(id); if (el) el.textContent = text; }
 
 // ─────────────────────────────────────────
 //  SCREEN NAV
@@ -155,7 +128,6 @@ function showScreen(id) {
   const el = document.getElementById(id);
   if (el) { el.classList.add('active'); el.scrollTop = 0; }
 }
-
 function showMainTab(screenId, tabId) {
   showScreen(screenId);
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -164,160 +136,128 @@ function showMainTab(screenId, tabId) {
   if (screenId === 'screen-send')     resetSendForm();
   if (screenId === 'screen-calendar') refreshCalendar();
 }
-
 function showReceiveTab() {
   const pending = state.receivedInvites.filter(i => i.rsvp === 'pending');
-  if (pending.length > 0) {
-    openReceivedInvite(pending[pending.length - 1]);
-  } else if (state.receivedInvites.length > 0) {
-    openReceivedInvite(state.receivedInvites[state.receivedInvites.length - 1]);
-  } else {
-    showMainTab('screen-home', 'tab-receive');
-  }
+  if (pending.length > 0) openReceivedInvite(pending[pending.length - 1]);
+  else showPopup({ titleIcon:'📥', title:'Inbox', icon:'✅', msg:'No pending invites right now!', btns:[{label:'OK', cb:closePopup}] });
 }
-
-window.showScreen     = showScreen;
-window.showMainTab    = showMainTab;
-window.showReceiveTab = showReceiveTab;
+window.showScreen = showScreen; window.showMainTab = showMainTab; window.showReceiveTab = showReceiveTab;
 
 // ─────────────────────────────────────────
 //  CLOCK
 // ─────────────────────────────────────────
 function updateClock() {
-  const now  = new Date();
-  let   h    = now.getHours();
-  const m    = String(now.getMinutes()).padStart(2,'0');
-  const ampm = h >= 12 ? 'PM' : 'AM';
-  h = h % 12 || 12;
-  const day = String(now.getDate()).padStart(2,'0');
-  const mon = String(now.getMonth()+1).padStart(2,'0');
-  const el  = document.getElementById('clock');
-  if (el) el.innerHTML = `${h}:${m} ${ampm}<br>${mon}/${day}`;
+  const now = new Date(), h = now.getHours(), m = String(now.getMinutes()).padStart(2,'0');
+  const el = document.getElementById('clock');
+  if (el) el.innerHTML = `${h % 12 || 12}:${m} ${h >= 12 ? 'PM' : 'AM'}<br>${String(now.getMonth()+1).padStart(2,'0')}/${String(now.getDate()).padStart(2,'0')}`;
 }
-updateClock();
-setInterval(updateClock, 1000);
+updateClock(); setInterval(updateClock, 1000);
 
 // ─────────────────────────────────────────
-//  POPUP SYSTEM
+//  POPUP
 // ─────────────────────────────────────────
 function showPopup(opts) {
   document.getElementById('popup-title-icon').textContent = opts.titleIcon || '📬';
   document.getElementById('popup-title').textContent      = opts.title     || 'Message';
   document.getElementById('popup-icon').textContent       = opts.icon      || '📬';
   document.getElementById('popup-msg').textContent        = opts.msg       || '';
-
-  const codeWrap      = document.getElementById('popup-code-wrap');
-  const inputWrap     = document.getElementById('popup-input-wrap');
-  const nameInputWrap = document.getElementById('popup-name-input-wrap');
-  const loadingWrap   = document.getElementById('popup-loading');
-
-  codeWrap.style.display      = opts.showCode       ? '' : 'none';
-  inputWrap.style.display     = opts.showInput      ? '' : 'none';
-  nameInputWrap.style.display = opts.showNameInputs ? '' : 'none';
-  loadingWrap.style.display   = opts.showLoading    ? '' : 'none';
-
-  if (opts.showCode) document.getElementById('popup-code').textContent = opts.codeVal || '';
+  ['popup-code-wrap','popup-input-wrap','popup-name-input-wrap','popup-loading'].forEach(id => {
+    document.getElementById(id).style.display = 'none';
+  });
+  if (opts.showCode)  { document.getElementById('popup-code-wrap').style.display = ''; document.getElementById('popup-code').textContent = opts.codeVal || ''; }
   if (opts.showInput) {
-    document.getElementById('popup-input-label').textContent = opts.inputLabel       || 'Enter code:';
-    document.getElementById('popup-input').value             = '';
-    document.getElementById('popup-input').placeholder      = opts.inputPlaceholder || '';
-    document.getElementById('popup-input').maxLength         = opts.inputMaxLen      || 8;
+    document.getElementById('popup-input-wrap').style.display = '';
+    document.getElementById('popup-input-label').textContent  = opts.inputLabel || 'Enter code:';
+    document.getElementById('popup-input').value              = '';
+    document.getElementById('popup-input').placeholder        = opts.inputPlaceholder || '';
+    document.getElementById('popup-input').maxLength          = opts.inputMaxLen || 8;
   }
   if (opts.showNameInputs) {
-    document.getElementById('popup-name-input').value           = '';
-    document.getElementById('popup-eco-name-input').value       = '';
-    document.getElementById('popup-eco-name-label').textContent = opts.secondLabel       || 'Ecosystem name:';
-    document.getElementById('popup-eco-name-input').placeholder = opts.secondPlaceholder || 'e.g. The Crew';
+    document.getElementById('popup-name-input-wrap').style.display = '';
+    document.getElementById('popup-name-input').value               = '';
+    document.getElementById('popup-eco-name-input').value           = '';
+    document.getElementById('popup-eco-name-label').textContent     = opts.secondLabel || 'Ecosystem name:';
+    document.getElementById('popup-eco-name-input').placeholder     = opts.secondPlaceholder || 'e.g. The Crew';
   }
-
   const btnsEl = document.getElementById('popup-btns');
   btnsEl.innerHTML = '';
-  (opts.btns || [{label:'OK', cb:null}]).forEach(b => {
-    const el       = document.createElement('button');
-    el.className   = 'btn';
-    el.textContent = b.label;
-    el.onclick     = () => { if (b.cb) b.cb(); else closePopup(); };
+  (opts.btns || [{label:'OK',cb:null}]).forEach(b => {
+    const el = document.createElement('button');
+    el.className = 'btn'; el.textContent = b.label;
+    el.onclick = () => { if (b.cb) b.cb(); else closePopup(); };
     btnsEl.appendChild(el);
   });
-
   document.getElementById('popup').classList.add('show');
 }
-
-function closePopup() {
-  document.getElementById('popup').classList.remove('show');
-}
-
-function setPopupLoading(loading, msg) {
-  document.getElementById('popup-loading').style.display = loading ? '' : 'none';
-  document.getElementById('popup-btns').style.display    = loading ? 'none' : '';
+function closePopup() { document.getElementById('popup').classList.remove('show'); }
+function setPopupLoading(on, msg) {
+  document.getElementById('popup-loading').style.display = on ? '' : 'none';
+  document.getElementById('popup-btns').style.display    = on ? 'none' : '';
   if (msg) document.getElementById('popup-msg').textContent = msg;
 }
-
-document.getElementById('popup').addEventListener('click', function(e) {
-  if (e.target === this) closePopup();
-});
-
+document.getElementById('popup').addEventListener('click', function(e) { if (e.target === this) closePopup(); });
 window.closePopup = closePopup;
+
+// ─────────────────────────────────────────
+//  SAVE USER PROFILE (helper)
+// ─────────────────────────────────────────
+async function saveUserProfile() {
+  await setDoc(doc(db, 'users', state.uid), {
+    name:     state.myName,
+    ecoCode:  state.ecoCode,
+    ecoName:  state.ecoName,
+    allEcos:  state.allEcos,
+    uid:      state.uid,
+  });
+}
 
 // ─────────────────────────────────────────
 //  CREATE ECOSYSTEM
 // ─────────────────────────────────────────
 function showCreateEco() {
   showPopup({
-    titleIcon:'⊕', title:'Create Ecosystem',
-    icon:'🌐', msg:'Name yourself and your ecosystem:',
+    titleIcon:'⊕', title:'Create Ecosystem', icon:'🌐',
+    msg: state.myName ? 'Name your new ecosystem:' : 'Name yourself and your ecosystem:',
     showNameInputs: true,
-    btns:[
-      { label:'CREATE', cb: confirmCreateEco },
-      { label:'Cancel', cb: closePopup },
-    ]
+    secondLabel: 'Ecosystem name:', secondPlaceholder: 'e.g. The Crew',
+    btns:[{ label:'CREATE', cb: confirmCreateEco }, { label:'Cancel', cb: closePopup }]
   });
+  // If already named, pre-fill
+  if (state.myName) {
+    setTimeout(() => { document.getElementById('popup-name-input').value = state.myName; }, 50);
+  }
 }
 window.showCreateEco = showCreateEco;
 
 async function confirmCreateEco() {
   const name    = document.getElementById('popup-name-input').value.trim();
   const ecoName = document.getElementById('popup-eco-name-input').value.trim();
-  if (!name || !ecoName) {
-    document.getElementById('popup-msg').textContent = '⚠ Please fill in both fields!';
-    return;
-  }
-
+  if (!name || !ecoName) { document.getElementById('popup-msg').textContent = '⚠ Please fill in both fields!'; return; }
   setPopupLoading(true, 'Creating your ecosystem...');
   const ecoCode = genCode(6);
-
   try {
-    await setDoc(doc(db, 'ecosystems', ecoCode), {
-      name: ecoName, createdBy: state.uid, createdAt: serverTimestamp(),
-    });
-    await setDoc(doc(db, 'ecosystems', ecoCode, 'members', state.uid), {
-      name: name, uid: state.uid, joinedAt: serverTimestamp(),
-    });
-    await setDoc(doc(db, 'users', state.uid), {
-      name: name, ecoCode: ecoCode, ecoName: ecoName, uid: state.uid,
-    });
+    await setDoc(doc(db, 'ecosystems', ecoCode), { name: ecoName, createdBy: state.uid, createdAt: serverTimestamp() });
+    await setDoc(doc(db, 'ecosystems', ecoCode, 'members', state.uid), { name, uid: state.uid, joinedAt: serverTimestamp() });
 
     state.myName  = name;
+    // Set as active eco and add to allEcos list
     state.ecoCode = ecoCode;
     state.ecoName = ecoName;
+    if (!state.allEcos.find(e => e.ecoCode === ecoCode)) {
+      state.allEcos.push({ ecoCode, ecoName });
+    }
+    await saveUserProfile();
 
     setPopupLoading(false);
-    document.getElementById('popup-msg').textContent               = `"${ecoName}" is live, ${name}! Share your code:`;
+    document.getElementById('popup-msg').textContent               = `"${ecoName}" is live! Share your code:`;
     document.getElementById('popup-code-wrap').style.display       = '';
     document.getElementById('popup-code').textContent              = ecoCode;
     document.getElementById('popup-name-input-wrap').style.display = 'none';
-    document.getElementById('popup-btns').style.display            = '';
     document.getElementById('popup-btns').innerHTML                = '';
-    const btn      = document.createElement('button');
-    btn.className  = 'btn';
-    btn.textContent = "LET'S GO!";
-    btn.onclick    = () => { closePopup(); enterApp(); };
+    const btn = document.createElement('button'); btn.className = 'btn'; btn.textContent = "LET'S GO!";
+    btn.onclick = () => { closePopup(); enterApp(); };
     document.getElementById('popup-btns').appendChild(btn);
-
-  } catch(err) {
-    setPopupLoading(false);
-    document.getElementById('popup-msg').textContent = '❌ Error: ' + err.message;
-  }
+  } catch(err) { setPopupLoading(false); document.getElementById('popup-msg').textContent = '❌ Error: ' + err.message; }
 }
 
 // ─────────────────────────────────────────
@@ -325,20 +265,16 @@ async function confirmCreateEco() {
 // ─────────────────────────────────────────
 function showJoinEco() {
   showPopup({
-    titleIcon:'►', title:'Join Ecosystem',
-    icon:'🔑', msg:"Enter your name and a friend's ecosystem code:",
+    titleIcon:'►', title:'Join Ecosystem', icon:'🔑',
+    msg: state.myName ? "Enter a friend's ecosystem code:" : "Enter your name and a friend's ecosystem code:",
     showNameInputs: true,
-    secondLabel: "Friend's ecosystem code:",
-    secondPlaceholder: 'e.g. XK7P2M',
-    btns:[
-      { label:'JOIN',   cb: confirmJoinEco },
-      { label:'Cancel', cb: closePopup },
-    ]
+    secondLabel: "Friend's ecosystem code:", secondPlaceholder: 'e.g. XK7P2M',
+    btns:[{ label:'JOIN', cb: confirmJoinEco }, { label:'Cancel', cb: closePopup }]
   });
   setTimeout(() => {
+    if (state.myName) document.getElementById('popup-name-input').value = state.myName;
     const inp = document.getElementById('popup-eco-name-input');
-    inp.maxLength = 6;
-    inp.style.textTransform = 'uppercase';
+    inp.maxLength = 6; inp.style.textTransform = 'uppercase';
   }, 50);
 }
 window.showJoinEco = showJoinEco;
@@ -346,82 +282,177 @@ window.showJoinEco = showJoinEco;
 async function confirmJoinEco() {
   const name = document.getElementById('popup-name-input').value.trim();
   const code = document.getElementById('popup-eco-name-input').value.trim().toUpperCase();
-  if (!name || code.length < 4) {
-    document.getElementById('popup-msg').textContent = '⚠ Please enter your name and a valid code!';
-    return;
-  }
-
+  if (!name || code.length < 4) { document.getElementById('popup-msg').textContent = '⚠ Please fill in both fields!'; return; }
+  if (state.allEcos.find(e => e.ecoCode === code)) { document.getElementById('popup-msg').textContent = "⚠ You're already in that ecosystem!"; return; }
   setPopupLoading(true, 'Looking up ecosystem...');
-
   try {
     const ecoSnap = await getDoc(doc(db, 'ecosystems', code));
-    if (!ecoSnap.exists()) {
-      setPopupLoading(false);
-      document.getElementById('popup-msg').textContent = '❌ Ecosystem not found. Check the code!';
-      return;
-    }
-
+    if (!ecoSnap.exists()) { setPopupLoading(false); document.getElementById('popup-msg').textContent = '❌ Ecosystem not found. Check the code!'; return; }
     const ecoData = ecoSnap.data();
+    await setDoc(doc(db, 'ecosystems', code, 'members', state.uid), { name, uid: state.uid, joinedAt: serverTimestamp() });
 
-    await setDoc(doc(db, 'ecosystems', code, 'members', state.uid), {
-      name: name, uid: state.uid, joinedAt: serverTimestamp(),
-    });
-    await setDoc(doc(db, 'users', state.uid), {
-      name: name, ecoCode: code, ecoName: ecoData.name, uid: state.uid,
-    });
-
-    state.myName  = name;
+    state.myName = name;
+    // Switch active eco to the newly joined one
     state.ecoCode = code;
     state.ecoName = ecoData.name;
+    if (!state.allEcos.find(e => e.ecoCode === code)) {
+      state.allEcos.push({ ecoCode: code, ecoName: ecoData.name });
+    }
+    await saveUserProfile();
 
     setPopupLoading(false);
     document.getElementById('popup-msg').textContent               = `Welcome, ${name}! You joined "${ecoData.name}"!`;
     document.getElementById('popup-name-input-wrap').style.display = 'none';
     document.getElementById('popup-btns').innerHTML                = '';
-    const btn      = document.createElement('button');
-    btn.className  = 'btn';
-    btn.textContent = "LET'S GO!";
-    btn.onclick    = () => { closePopup(); enterApp(); };
+    const btn = document.createElement('button'); btn.className = 'btn'; btn.textContent = "LET'S GO!";
+    btn.onclick = () => { closePopup(); enterApp(); };
     document.getElementById('popup-btns').appendChild(btn);
-
-  } catch(err) {
-    setPopupLoading(false);
-    document.getElementById('popup-msg').textContent = '❌ Error: ' + err.message;
-  }
+  } catch(err) { setPopupLoading(false); document.getElementById('popup-msg').textContent = '❌ Error: ' + err.message; }
 }
 
 // ─────────────────────────────────────────
-//  ENTER APP
+//  SWITCH ECOSYSTEM
 // ─────────────────────────────────────────
+function showSwitchEco() {
+  if (state.allEcos.length <= 1) {
+    showPopup({
+      titleIcon:'🌐', title:'My Ecosystems', icon:'💡',
+      msg:"You're only in one ecosystem. Join or create another to switch!",
+      btns:[
+        { label:'+ CREATE', cb: () => { closePopup(); showCreateEco(); }},
+        { label:'► JOIN',   cb: () => { closePopup(); showJoinEco(); }},
+        { label:'Cancel',   cb: closePopup },
+      ]
+    });
+    return;
+  }
+  const btnsEl = document.getElementById('popup-btns');
+  showPopup({
+    titleIcon:'🌐', title:'Switch Ecosystem', icon:'🔀',
+    msg: 'Select an ecosystem to switch to:',
+    btns: []
+  });
+  // Build ecosystem buttons dynamically
+  btnsEl.innerHTML = '';
+  state.allEcos.forEach(eco => {
+    const btn = document.createElement('button');
+    btn.className = 'btn full' + (eco.ecoCode === state.ecoCode ? ' green-sel' : '');
+    btn.style.marginBottom = '4px';
+    btn.textContent = (eco.ecoCode === state.ecoCode ? '✔ ' : '') + eco.ecoName + ' (' + eco.ecoCode + ')';
+    btn.onclick = () => {
+      if (eco.ecoCode !== state.ecoCode) {
+        state.ecoCode = eco.ecoCode;
+        state.ecoName = eco.ecoName;
+        saveUserProfile();
+        closePopup();
+        enterApp();
+      } else {
+        closePopup();
+      }
+    };
+    btnsEl.appendChild(btn);
+  });
+  // Add/leave options
+  const sep = document.createElement('div');
+  sep.style.cssText = 'height:1px;background:var(--shadow);margin:6px 0;';
+  btnsEl.appendChild(sep);
+  const createBtn = document.createElement('button');
+  createBtn.className = 'btn full'; createBtn.textContent = '⊕ Create New Ecosystem';
+  createBtn.onclick = () => { closePopup(); showCreateEco(); };
+  btnsEl.appendChild(createBtn);
+  const joinBtn = document.createElement('button');
+  joinBtn.className = 'btn full'; joinBtn.textContent = '► Join Another Ecosystem';
+  joinBtn.onclick = () => { closePopup(); showJoinEco(); };
+  btnsEl.appendChild(joinBtn);
+}
+window.showSwitchEco = showSwitchEco;
+
+// ─────────────────────────────────────────
+//  LEAVE ECOSYSTEM
+// ─────────────────────────────────────────
+function showLeaveEco() {
+  showPopup({
+    titleIcon:'🚪', title:'Leave Ecosystem', icon:'⚠️',
+    msg: `Leave "${state.ecoName}" (${state.ecoCode})? You won't receive invites from this group anymore.`,
+    btns:[
+      { label:'LEAVE', cb: confirmLeaveEco },
+      { label:'Cancel', cb: closePopup },
+    ]
+  });
+}
+window.showLeaveEco = showLeaveEco;
+
+async function confirmLeaveEco() {
+  setPopupLoading(true, 'Leaving ecosystem...');
+  try {
+    // Remove from members subcollection
+    await deleteDoc(doc(db, 'ecosystems', state.ecoCode, 'members', state.uid));
+
+    // Remove from allEcos
+    state.allEcos = state.allEcos.filter(e => e.ecoCode !== state.ecoCode);
+
+    // Switch to another eco if available
+    if (state.allEcos.length > 0) {
+      state.ecoCode = state.allEcos[0].ecoCode;
+      state.ecoName = state.allEcos[0].ecoName;
+    } else {
+      state.ecoCode = '';
+      state.ecoName = '';
+    }
+    await saveUserProfile();
+
+    setPopupLoading(false);
+    closePopup();
+    teardownListeners();
+    if (state.ecoCode) {
+      enterApp();
+    } else {
+      document.getElementById('main-taskbar').style.display = 'none';
+      showScreen('screen-welcome');
+    }
+  } catch(err) { setPopupLoading(false); document.getElementById('popup-msg').textContent = '❌ Error: ' + err.message; }
+}
+
+// ─────────────────────────────────────────
+//  ENTER APP — real-time listeners
+// ─────────────────────────────────────────
+function teardownListeners() {
+  if (state.unsubMembers) { state.unsubMembers(); state.unsubMembers = null; }
+  if (state.unsubInvites) { state.unsubInvites(); state.unsubInvites = null; }
+  if (state.unsubSent)    { state.unsubSent();    state.unsubSent    = null; }
+}
+
 function enterApp() {
+  teardownListeners();
   document.getElementById('main-taskbar').style.display = 'flex';
   showScreen('screen-home');
   document.getElementById('tab-home').classList.add('active');
 
-  if (state.unsubscribeMembers) state.unsubscribeMembers();
-  state.unsubscribeMembers = onSnapshot(
+  // Members
+  state.unsubMembers = onSnapshot(
     collection(db, 'ecosystems', state.ecoCode, 'members'),
-    (snap) => {
+    snap => {
       state.members = snap.docs.map(d => d.data()).filter(m => m.uid !== state.uid);
       refreshHomeScreen();
     }
   );
 
-  if (state.unsubscribeInvites) state.unsubscribeInvites();
-  state.unsubscribeInvites = onSnapshot(
+  // Received invites (to me, in this eco) — all RSVP states for calendar, but inbox shows only pending
+  state.unsubInvites = onSnapshot(
     query(collection(db, 'invites'), where('toUid','==',state.uid), where('ecoCode','==',state.ecoCode)),
-    (snap) => {
+    snap => {
       state.receivedInvites = snap.docs.map(d => ({ id:d.id, ...d.data() }));
       refreshHomeScreen();
       const pending = state.receivedInvites.filter(i => i.rsvp === 'pending').length;
-      const tabEl   = document.getElementById('tab-receive');
+      const tabEl = document.getElementById('tab-receive');
       if (tabEl) tabEl.querySelector('.tab-label').textContent = pending > 0 ? `INBOX(${pending})` : 'INBOX';
     }
   );
 
-  onSnapshot(
-    query(collection(db, 'invites'), where('fromUid','==',state.uid)),
-    (snap) => { state.sentInvites = snap.docs.map(d => ({ id:d.id, ...d.data() })); }
+  // Sent invites (from me) — for calendar
+  state.unsubSent = onSnapshot(
+    query(collection(db, 'invites'), where('fromUid','==',state.uid), where('ecoCode','==',state.ecoCode)),
+    snap => { state.sentInvites = snap.docs.map(d => ({ id:d.id, ...d.data() })); }
   );
 }
 window.enterApp = enterApp;
@@ -431,15 +462,11 @@ window.enterApp = enterApp;
 // ─────────────────────────────────────────
 function showInviteCode() {
   showPopup({
-    titleIcon:'📋', title:'Your Ecosystem Code',
-    icon:'🌐',
-    msg:`Share this with friends so they can join "${state.ecoName}":`,
+    titleIcon:'📋', title:'Ecosystem Code', icon:'🌐',
+    msg:`Share this code so friends can join "${state.ecoName}":`,
     showCode: true, codeVal: state.ecoCode,
     btns:[
-      { label:'📋 Copy', cb: () => {
-          navigator.clipboard?.writeText(state.ecoCode);
-          document.getElementById('popup-msg').textContent = '✅ Code copied to clipboard!';
-      }},
+      { label:'📋 Copy', cb: () => { navigator.clipboard?.writeText(state.ecoCode); document.getElementById('popup-msg').textContent = '✅ Copied!'; }},
       { label:'Close', cb: closePopup },
     ]
   });
@@ -451,13 +478,10 @@ window.showInviteCode = showInviteCode;
 // ─────────────────────────────────────────
 function showAddMember() {
   showPopup({
-    titleIcon:'➕', title:'Add Member',
-    icon:'👤', msg:"Enter a friend's ecosystem code to connect:",
+    titleIcon:'➕', title:'Add Member', icon:'👤',
+    msg:"Enter a friend's ecosystem code to connect:",
     showInput: true, inputLabel:"Friend's Code:", inputPlaceholder:'e.g. XK7P2M', inputMaxLen:6,
-    btns:[
-      { label:'ADD',    cb: confirmAddMember },
-      { label:'Cancel', cb: closePopup },
-    ]
+    btns:[{ label:'ADD', cb: confirmAddMember }, { label:'Cancel', cb: closePopup }]
   });
   setTimeout(() => { document.getElementById('popup-input').style.textTransform = 'uppercase'; }, 50);
 }
@@ -465,64 +489,56 @@ window.showAddMember = showAddMember;
 
 async function confirmAddMember() {
   const code = document.getElementById('popup-input').value.trim().toUpperCase();
-  if (code.length < 4) { document.getElementById('popup-msg').textContent = '⚠ Please enter a valid code (4–6 chars).'; return; }
+  if (code.length < 4) { document.getElementById('popup-msg').textContent = '⚠ Please enter a valid code.'; return; }
   if (code === state.ecoCode) { document.getElementById('popup-msg').textContent = "⚠ That's your own code!"; return; }
-
   setPopupLoading(true, 'Looking up ecosystem...');
   try {
     const ecoSnap = await getDoc(doc(db, 'ecosystems', code));
-    if (!ecoSnap.exists()) {
-      setPopupLoading(false);
-      document.getElementById('popup-msg').textContent = '❌ Ecosystem not found. Check the code!';
-      return;
-    }
+    if (!ecoSnap.exists()) { setPopupLoading(false); document.getElementById('popup-msg').textContent = '❌ Ecosystem not found.'; return; }
+    await setDoc(doc(db, 'ecosystems', code, 'members', state.uid), { name: state.myName, uid: state.uid, joinedAt: serverTimestamp() });
     const ecoData = ecoSnap.data();
-    await setDoc(doc(db, 'ecosystems', code, 'members', state.uid), {
-      name: state.myName, uid: state.uid, joinedAt: serverTimestamp(),
-    });
     setPopupLoading(false);
-    document.getElementById('popup-msg').textContent = `✅ Connected to "${ecoData.name}"!`;
+    document.getElementById('popup-msg').textContent = `✅ You joined "${ecoData.name}"! They can now send you invites.`;
     document.getElementById('popup-btns').innerHTML  = '';
-    const btn = document.createElement('button');
-    btn.className = 'btn'; btn.textContent = 'GREAT!'; btn.onclick = closePopup;
+    const btn = document.createElement('button'); btn.className = 'btn'; btn.textContent = 'GREAT!'; btn.onclick = closePopup;
     document.getElementById('popup-btns').appendChild(btn);
-  } catch(err) {
-    setPopupLoading(false);
-    document.getElementById('popup-msg').textContent = '❌ Error: ' + err.message;
-  }
+  } catch(err) { setPopupLoading(false); document.getElementById('popup-msg').textContent = '❌ Error: ' + err.message; }
 }
 
 // ─────────────────────────────────────────
-//  HOME SCREEN
+//  REFRESH HOME SCREEN
 // ─────────────────────────────────────────
 function refreshHomeScreen() {
   document.getElementById('eco-name-display').textContent      = state.ecoName || 'My Eco';
   document.getElementById('home-eco-code-display').textContent = 'ECO: ' + (state.ecoCode || '------');
   document.getElementById('home-member-count').textContent     = (state.members.length + 1) + ' member' + (state.members.length !== 0 ? 's' : '');
+  document.getElementById('eco-count-badge').textContent       = state.allEcos.length > 1 ? `${state.allEcos.length} ecosystems` : '1 ecosystem';
 
-  const mlEl = document.getElementById('member-list-home');
-  mlEl.innerHTML = [{ name: state.myName + ' (you)' }].concat(state.members).map(m =>
-    `<div class="member-item"><div class="member-dot"></div><span>${m.name}</span></div>`
-  ).join('');
+  // Members list
+  document.getElementById('member-list-home').innerHTML =
+    [{ name: state.myName + ' (you)' }].concat(state.members).map(m =>
+      `<div class="member-item"><div class="member-dot"></div><span>${m.name}</span></div>`
+    ).join('');
 
+  // Inbox — PENDING ONLY
+  const pending = state.receivedInvites.filter(i => i.rsvp === 'pending');
   const incomingEl = document.getElementById('incoming-invites-list');
-  if (state.receivedInvites.length === 0) {
-    incomingEl.innerHTML = `<div style="font-family:var(--font-mono);font-size:12px;color:#888;text-align:center;padding:8px;">No incoming invites yet.</div>`;
+  if (pending.length === 0) {
+    incomingEl.innerHTML = `<div style="font-family:var(--font-mono);font-size:12px;color:#888;text-align:center;padding:8px;">No pending invites.</div>`;
   } else {
-    incomingEl.innerHTML = [...state.receivedInvites]
+    incomingEl.innerHTML = [...pending]
       .sort((a,b) => (b.createdAt?.seconds||0) - (a.createdAt?.seconds||0))
-      .map(inv => {
-        const bg  = inv.rsvp === 'yes' ? 'var(--lt-green)' : inv.rsvp === 'no' ? 'var(--lt-red)' : 'var(--lt-yellow)';
-        const dot = inv.rsvp === 'pending' ? '🔴 ' : '';
-        return `<div onclick="openInviteById('${inv.id}')" style="background:${bg};border-bottom:1px solid var(--mid);padding:6px 8px;cursor:pointer;">
-          <div style="font-family:var(--font-main);font-size:18px;">${dot}${inv.title}</div>
-          <div style="font-family:var(--font-mono);font-size:10px;color:#555;">FROM: ${inv.fromName} · ${formatDate(inv.date)} · RSVP: ${(inv.rsvp||'—').toUpperCase()}</div>
-        </div>`;
-      }).join('');
+      .map(inv => `
+        <div onclick="openInviteById('${inv.id}')" style="background:var(--lt-yellow);border-bottom:1px solid var(--mid);padding:6px 8px;cursor:pointer;">
+          <div style="font-family:var(--font-main);font-size:18px;">🔴 ${inv.title}</div>
+          <div style="font-family:var(--font-mono);font-size:10px;color:#555;">FROM: ${inv.fromName} · ${formatDate(inv.date)}</div>
+        </div>`
+      ).join('');
   }
 
-  const names = state.members.map(m => m.name).join(' ★ ') || 'Share your code to invite friends';
-  document.getElementById('home-ticker').textContent = `★ ${state.ecoName.toUpperCase()} ★ MEMBERS: ${names.toUpperCase()} ★ CODE: ${state.ecoCode} ★ `;
+  // Ticker
+  const names = state.members.map(m => m.name).join(' ★ ') || 'Share your code!';
+  document.getElementById('home-ticker').textContent = `★ ${state.ecoName.toUpperCase()} ★ ${names.toUpperCase()} ★ CODE: ${state.ecoCode} ★ `;
 }
 
 function openInviteById(id) {
@@ -534,65 +550,41 @@ window.openInviteById = openInviteById;
 // ─────────────────────────────────────────
 //  SEND INVITE
 // ─────────────────────────────────────────
-function goToSendInvite() {
-  resetSendForm();
-  showScreen('screen-send');
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById('tab-send').classList.add('active');
-}
+function goToSendInvite() { resetSendForm(); showScreen('screen-send'); document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active')); document.getElementById('tab-send').classList.add('active'); }
 window.goToSendInvite = goToSendInvite;
 
 function resetSendForm() {
   state.selectedRecipient = null;
   document.getElementById('selected-recipient-name').textContent = '—';
-  ['inv-title','inv-date','inv-time','inv-location','inv-details'].forEach(id => {
-    document.getElementById(id).value = '';
-  });
+  ['inv-title','inv-date','inv-time','inv-location','inv-details'].forEach(id => { document.getElementById(id).value = ''; });
   sendStep(1);
   const cp = document.getElementById('contact-picker');
   if (state.members.length === 0) {
     cp.innerHTML = `<div style="font-family:var(--font-mono);font-size:11px;color:#888;padding:4px;">No members yet. Add members first!</div>`;
   } else {
     cp.innerHTML = state.members.map(m =>
-      `<div class="contact-item" id="contact-${m.uid}" onclick="selectContact('${m.name}','${m.uid}')">
-        <div class="member-dot"></div>${m.name}
-      </div>`
+      `<div class="contact-item" id="contact-${m.uid}" onclick="selectContact('${m.name}','${m.uid}')"><div class="member-dot"></div>${m.name}</div>`
     ).join('');
   }
 }
-
 function selectContact(name, uid) {
   state.selectedRecipient = { name, uid };
   document.getElementById('selected-recipient-name').textContent = name;
   document.querySelectorAll('.contact-item').forEach(el => el.classList.remove('selected-contact'));
-  const el = document.getElementById('contact-' + uid);
-  if (el) el.classList.add('selected-contact');
+  const el = document.getElementById('contact-' + uid); if (el) el.classList.add('selected-contact');
 }
 window.selectContact = selectContact;
 
 function sendStep(n) {
-  [1,2,3].forEach(i => {
-    document.getElementById('send-step-' + i).style.display = (i === n) ? '' : 'none';
-  });
-  ['dot1','dot2','dot3'].forEach((id, i) => {
-    document.getElementById(id).className = 'step-dot' + (i+1 < n ? ' done' : (i+1 === n ? ' current' : ''));
-  });
-  if (n === 2) {
-    if (!state.selectedRecipient) { sendStep(1); setStatus('send-status','⚠ Please select a recipient first!'); return; }
-    setStatus('send-status','Fill in your event details.');
-  }
+  [1,2,3].forEach(i => { document.getElementById('send-step-' + i).style.display = (i === n) ? '' : 'none'; });
+  ['dot1','dot2','dot3'].forEach((id,i) => { document.getElementById(id).className = 'step-dot' + (i+1 < n ? ' done' : i+1 === n ? ' current' : ''); });
+  if (n === 2) { if (!state.selectedRecipient) { sendStep(1); setStatus('send-status','⚠ Select a recipient first!'); return; } setStatus('send-status','Fill in your event details.'); }
   if (n === 3) {
-    const title = document.getElementById('inv-title').value.trim();
-    const date  = document.getElementById('inv-date').value;
-    if (!title || !date) { sendStep(2); setStatus('send-status','⚠ Title and date are required!'); return; }
+    const title = document.getElementById('inv-title').value.trim(), date = document.getElementById('inv-date').value;
+    if (!title || !date) { sendStep(2); setStatus('send-status','⚠ Title and date required!'); return; }
     document.getElementById('prev-title').textContent = title;
-    document.getElementById('prev-details').innerHTML = `
-      <strong>TO:</strong> ${state.selectedRecipient.name}<br>
-      <strong>📅</strong> ${formatDate(date)} at ${formatTime(document.getElementById('inv-time').value)}<br>
-      <strong>📍</strong> ${document.getElementById('inv-location').value || 'TBD'}<br>
-      <strong>📝</strong> ${document.getElementById('inv-details').value || '—'}
-    `;
-    setStatus('send-status','Looking good! Ready to send.');
+    document.getElementById('prev-details').innerHTML = `<strong>TO:</strong> ${state.selectedRecipient.name}<br><strong>📅</strong> ${formatDate(date)} at ${formatTime(document.getElementById('inv-time').value)}<br><strong>📍</strong> ${document.getElementById('inv-location').value || 'TBD'}<br><strong>📝</strong> ${document.getElementById('inv-details').value || '—'}`;
+    setStatus('send-status','Ready to send!');
   }
 }
 window.sendStep = sendStep;
@@ -602,60 +594,44 @@ async function sendInvite() {
   if (btn) { btn.textContent = '⏳ Sending...'; btn.disabled = true; }
   try {
     await addDoc(collection(db, 'invites'), {
-      fromUid:   state.uid,
-      fromName:  state.myName,
-      toUid:     state.selectedRecipient.uid,
-      toName:    state.selectedRecipient.name,
-      ecoCode:   state.ecoCode,
-      title:     document.getElementById('inv-title').value.trim(),
-      date:      document.getElementById('inv-date').value,
-      time:      document.getElementById('inv-time').value,
-      location:  document.getElementById('inv-location').value,
-      details:   document.getElementById('inv-details').value,
-      rsvp:      'pending',
-      createdAt: serverTimestamp(),
+      fromUid: state.uid, fromName: state.myName,
+      toUid: state.selectedRecipient.uid, toName: state.selectedRecipient.name,
+      ecoCode: state.ecoCode,
+      title: document.getElementById('inv-title').value.trim(),
+      date: document.getElementById('inv-date').value, time: document.getElementById('inv-time').value,
+      location: document.getElementById('inv-location').value, details: document.getElementById('inv-details').value,
+      rsvp: 'pending', createdAt: serverTimestamp(),
     });
-    setStatus('send-status','✔ Invite sent!');
     if (btn) { btn.textContent = '📤 SEND!'; btn.disabled = false; }
-    showPopup({
-      titleIcon:'✅', title:'Invite Sent!', icon:'📤',
-      msg:`Your invite to ${state.selectedRecipient.name} has been sent!`,
-      btns:[
-        { label:'SEND ANOTHER', cb: () => { closePopup(); resetSendForm(); }},
-        { label:'HOME',         cb: () => { closePopup(); showMainTab('screen-home','tab-home'); }},
-      ]
+    showPopup({ titleIcon:'✅', title:'Invite Sent!', icon:'📤', msg:`Invite sent to ${state.selectedRecipient.name}!`,
+      btns:[{ label:'SEND ANOTHER', cb: () => { closePopup(); resetSendForm(); }}, { label:'HOME', cb: () => { closePopup(); showMainTab('screen-home','tab-home'); }}]
     });
   } catch(err) {
     if (btn) { btn.textContent = '📤 SEND!'; btn.disabled = false; }
-    setStatus('send-status','❌ Error: ' + err.message);
+    setStatus('send-status','❌ ' + err.message);
   }
 }
 window.sendInvite = sendInvite;
 
 // ─────────────────────────────────────────
-//  RECEIVE INVITE
+//  RECEIVE / RSVP
 // ─────────────────────────────────────────
 function openReceivedInvite(inv) {
   state.activeInvite = inv;
   document.getElementById('rec-title').textContent = inv.title;
-  document.getElementById('rec-details').innerHTML = `
-    <strong>FROM:</strong> ${inv.fromName}<br>
-    <strong>📅</strong> ${formatDate(inv.date)} at ${formatTime(inv.time)}<br>
-    <strong>📍</strong> ${inv.location || 'TBD'}<br>
-    <strong>📝</strong> ${inv.details || '—'}
-  `;
+  document.getElementById('rec-details').innerHTML = `<strong>FROM:</strong> ${inv.fromName}<br><strong>📅</strong> ${formatDate(inv.date)} at ${formatTime(inv.time)}<br><strong>📍</strong> ${inv.location || 'TBD'}<br><strong>📝</strong> ${inv.details || '—'}`;
   const stamp = document.getElementById('receive-stamp');
   const yBtn  = document.getElementById('rsvp-yes-btn');
   const nBtn  = document.getElementById('rsvp-no-btn');
   if (inv.rsvp !== 'pending') {
-    stamp.className = 'invite-card-stamp' + (inv.rsvp === 'yes' ? ' yes' : '');
+    stamp.className   = 'invite-card-stamp' + (inv.rsvp === 'yes' ? ' yes' : '');
     stamp.textContent = inv.rsvp === 'yes' ? 'GOING!' : 'DECLINED';
-    yBtn.className = 'btn big' + (inv.rsvp === 'yes' ? ' green-sel' : '');
-    nBtn.className = 'btn big' + (inv.rsvp === 'no'  ? ' red-sel'   : '');
+    yBtn.className    = 'btn big' + (inv.rsvp === 'yes' ? ' green-sel' : '');
+    nBtn.className    = 'btn big' + (inv.rsvp === 'no'  ? ' red-sel'   : '');
     setStatus('receive-status','RSVP: ' + inv.rsvp.toUpperCase());
   } else {
     stamp.className = 'invite-card-stamp pending'; stamp.textContent = 'PENDING';
-    yBtn.className = 'btn big'; nBtn.className = 'btn big';
+    yBtn.className  = 'btn big'; nBtn.className = 'btn big';
     setStatus('receive-status','Awaiting your response...');
   }
   showScreen('screen-receive');
@@ -670,6 +646,7 @@ async function doRsvp(choice) {
   const nBtn = document.getElementById('rsvp-no-btn');
   yBtn.disabled = nBtn.disabled = true;
   try {
+    // updateDoc works because the security rule allows toUid to update only the rsvp field
     await updateDoc(doc(db, 'invites', inv.id), { rsvp: choice });
     inv.rsvp = choice;
     const stamp = document.getElementById('receive-stamp');
@@ -677,19 +654,18 @@ async function doRsvp(choice) {
       stamp.className = 'invite-card-stamp yes'; stamp.textContent = 'GOING!';
       yBtn.className = 'btn big green-sel'; nBtn.className = 'btn big';
       setStatus('receive-status',"✔ You're going!");
-      showPopup({ titleIcon:'🎉', title:'RSVP Confirmed!', icon:'🥳',
-        msg:`You're going to "${inv.title}"! 🎉`, btns:[{ label:'WOO-HOO!', cb:closePopup }]
-      });
+      showPopup({ titleIcon:'🎉', title:'RSVP Confirmed!', icon:'🥳', msg:`You're going to "${inv.title}"! 🎉`, btns:[{ label:'WOO-HOO!', cb: closePopup }] });
     } else {
       stamp.className = 'invite-card-stamp'; stamp.textContent = 'DECLINED';
       yBtn.className = 'btn big'; nBtn.className = 'btn big red-sel';
       setStatus('receive-status','✘ You declined.');
-      showPopup({ titleIcon:'😢', title:'RSVP Sent', icon:'😞',
-        msg:`You won't be attending "${inv.title}". You'll be missed!`, btns:[{ label:'OK', cb:closePopup }]
-      });
+      showPopup({ titleIcon:'😢', title:'RSVP Sent', icon:'😞', msg:`You won't be attending "${inv.title}".`, btns:[{ label:'OK', cb: closePopup }] });
     }
+    // Go back to home after a moment so the inbox updates
+    setTimeout(() => { showMainTab('screen-home','tab-home'); }, 1800);
   } catch(err) {
-    setStatus('receive-status','❌ Error: ' + err.message);
+    setStatus('receive-status','❌ Permission denied. Check Firestore rules.');
+    document.getElementById('rsvp-error-hint').style.display = '';
   } finally {
     yBtn.disabled = nBtn.disabled = false;
   }
@@ -697,22 +673,14 @@ async function doRsvp(choice) {
 window.doRsvp = doRsvp;
 
 function doAddCalendar() {
-  const inv = state.activeInvite;
-  if (!inv) return;
-  const dt  = (inv.date||'').replace(/-/g,'');
-  const tm  = (inv.time||'1900').replace(':','');
-  const ics = [
-    'BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//EcoInvite//EN','BEGIN:VEVENT',
-    `DTSTART:${dt}T${tm}00`, `SUMMARY:${inv.title}`,
-    `DESCRIPTION:${inv.details||''}`,
-    `LOCATION:${(inv.location||'').replace(/,/g,'\\,')}`,
-    'END:VEVENT','END:VCALENDAR'
-  ].join('\r\n');
+  const inv = state.activeInvite; if (!inv) return;
+  const dt = (inv.date||'').replace(/-/g,''), tm = (inv.time||'1900').replace(':','');
+  const ics = ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//EcoInvite//EN','BEGIN:VEVENT',
+    `DTSTART:${dt}T${tm}00`,`SUMMARY:${inv.title}`,`DESCRIPTION:${inv.details||''}`,
+    `LOCATION:${(inv.location||'').replace(/,/g,'\\,')}`, 'END:VEVENT','END:VCALENDAR'].join('\r\n');
   const blob = new Blob([ics], { type:'text/calendar;charset=utf-8' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href = url; a.download = 'invite.ics'; a.click();
-  URL.revokeObjectURL(url);
+  const url = URL.createObjectURL(blob), a = document.createElement('a');
+  a.href = url; a.download = 'invite.ics'; a.click(); URL.revokeObjectURL(url);
   setStatus('receive-status','📅 Calendar file downloaded!');
 }
 window.doAddCalendar = doAddCalendar;
@@ -721,26 +689,19 @@ window.doAddCalendar = doAddCalendar;
 //  CALENDAR & COUNTDOWN
 // ─────────────────────────────────────────
 let cdInterval = null;
-
 function refreshCalendar() {
-  const all      = [...state.receivedInvites, ...state.sentInvites];
-  const now      = new Date();
-  const upcoming = all.filter(e => e.date && new Date(e.date + 'T' + (e.time||'00:00')) > now)
-                      .sort((a,b) => new Date(a.date) - new Date(b.date));
-  const cdArea   = document.getElementById('countdown-area');
-  const noMsg    = document.getElementById('no-events-msg');
-
-  if (upcoming.length === 0) {
-    cdArea.style.display = 'none'; noMsg.style.display = '';
-    if (cdInterval) clearInterval(cdInterval);
-  } else {
-    const next = upcoming[0];
-    cdArea.style.display = ''; noMsg.style.display = 'none';
+  const all = [...state.receivedInvites, ...state.sentInvites];
+  const now = new Date();
+  const upcoming = all.filter(e => e.date && new Date(e.date+'T'+(e.time||'00:00')) > now).sort((a,b) => new Date(a.date)-new Date(b.date));
+  const cdArea = document.getElementById('countdown-area'), noMsg = document.getElementById('no-events-msg');
+  if (upcoming.length === 0) { cdArea.style.display='none'; noMsg.style.display=''; if (cdInterval) clearInterval(cdInterval); }
+  else {
+    const next = upcoming[0]; cdArea.style.display=''; noMsg.style.display='none';
     document.getElementById('cd-event-name').textContent = next.title;
     if (cdInterval) clearInterval(cdInterval);
     function tick() {
-      const diff = new Date(next.date + 'T' + (next.time||'00:00')) - new Date();
-      if (diff <= 0) { ['cd-days','cd-hours','cd-mins','cd-secs'].forEach(id => document.getElementById(id).textContent = '00'); return; }
+      const diff = new Date(next.date+'T'+(next.time||'00:00')) - new Date();
+      if (diff<=0) { ['cd-days','cd-hours','cd-mins','cd-secs'].forEach(id => document.getElementById(id).textContent='00'); return; }
       document.getElementById('cd-days').textContent  = String(Math.floor(diff/86400000)).padStart(2,'0');
       document.getElementById('cd-hours').textContent = String(Math.floor((diff%86400000)/3600000)).padStart(2,'0');
       document.getElementById('cd-mins').textContent  = String(Math.floor((diff%3600000)/60000)).padStart(2,'0');
@@ -748,45 +709,26 @@ function refreshCalendar() {
     }
     tick(); cdInterval = setInterval(tick, 1000);
   }
-
   buildMiniCal(all);
-
   const listEl = document.getElementById('all-events-list');
-  if (all.length === 0) {
-    listEl.innerHTML = `<span style="font-family:var(--font-mono);font-size:11px;color:#888;">No events yet.</span>`;
-  } else {
-    listEl.innerHTML = [...all].sort((a,b) => new Date(a.date) - new Date(b.date)).map(e => {
-      const isPast = e.date && new Date(e.date) < now;
-      const dir    = e.fromUid === state.uid ? '▲ Sent' : '▼ Received';
-      return `<div style="padding:4px 0;border-bottom:1px solid var(--mid);opacity:${isPast?0.5:1}">
-        <div style="font-family:var(--font-main);font-size:17px;">${e.title}</div>
-        <div style="font-family:var(--font-mono);font-size:10px;color:#555;">${dir} · ${formatDate(e.date)} · RSVP: ${(e.rsvp||'—').toUpperCase()}</div>
-      </div>`;
-    }).join('');
-  }
+  if (all.length===0) { listEl.innerHTML=`<span style="font-family:var(--font-mono);font-size:11px;color:#888;">No events yet.</span>`; return; }
+  listEl.innerHTML = [...all].sort((a,b)=>new Date(a.date)-new Date(b.date)).map(e => {
+    const isPast = e.date && new Date(e.date)<now, dir = e.fromUid===state.uid ? '▲ Sent' : '▼ Received';
+    return `<div style="padding:4px 0;border-bottom:1px solid var(--mid);opacity:${isPast?0.5:1}"><div style="font-family:var(--font-main);font-size:17px;">${e.title}</div><div style="font-family:var(--font-mono);font-size:10px;color:#555;">${dir} · ${formatDate(e.date)} · RSVP: ${(e.rsvp||'—').toUpperCase()}</div></div>`;
+  }).join('');
 }
 window.refreshCalendar = refreshCalendar;
 
 function buildMiniCal(allEvents) {
-  const cal      = document.getElementById('mini-cal');
-  const now      = new Date();
-  const year     = now.getFullYear();
-  const month    = now.getMonth();
-  const first    = new Date(year, month, 1).getDay();
-  const days     = new Date(year, month+1, 0).getDate();
-  const months   = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  const dayN     = ['Su','Mo','Tu','We','Th','Fr','Sa'];
-  const evtDates = new Set(allEvents.map(e => e.date));
-  let html = `<div class="cal-header">${months[month]} ${year}</div><div class="cal-grid">`;
-  dayN.forEach(d => { html += `<div class="cal-day-head">${d}</div>`; });
-  for (let i = 0; i < first; i++) html += `<div class="cal-day other-month"></div>`;
-  for (let d = 1; d <= days; d++) {
-    const ds  = `${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-    const cls = evtDates.has(ds) ? 'cal-day event-day' : (d === now.getDate() ? 'cal-day today' : 'cal-day');
-    html += `<div class="${cls}">${d}</div>`;
-  }
-  html += '</div>';
-  cal.innerHTML = html;
+  const cal=document.getElementById('mini-cal'), now=new Date(), year=now.getFullYear(), month=now.getMonth();
+  const first=new Date(year,month,1).getDay(), days=new Date(year,month+1,0).getDate();
+  const months=['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const evtDates=new Set(allEvents.map(e=>e.date));
+  let html=`<div class="cal-header">${months[month]} ${year}</div><div class="cal-grid">`;
+  ['Su','Mo','Tu','We','Th','Fr','Sa'].forEach(d=>{html+=`<div class="cal-day-head">${d}</div>`;});
+  for(let i=0;i<first;i++) html+=`<div class="cal-day other-month"></div>`;
+  for(let d=1;d<=days;d++){const ds=`${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;html+=`<div class="${evtDates.has(ds)?'cal-day event-day':d===now.getDate()?'cal-day today':'cal-day'}">${d}</div>`;}
+  html+='</div>'; cal.innerHTML=html;
 }
 
 </script>
@@ -795,132 +737,303 @@ function buildMiniCal(allEvents) {
 @import url('https://fonts.googleapis.com/css2?family=VT323&family=Share+Tech+Mono&display=swap');
 
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-:root{--gray:#c0c0c0;--white:#ffffff;--black:#000000;--dark:#0a0a0a;--shadow:#808080;--mid:#dfdfdf;--blue:#000080;--blue2:#1084d0;--teal:#008080;--green:#008000;--red:#800000;--yellow:#ffff00;--lt-green:#c8f0c8;--lt-red:#f0c8c8;--lt-yellow:#ffffc8;--font-main:'VT323',monospace;--font-mono:'Share Tech Mono',monospace}
-html,body{width:100%;height:100%;overflow:hidden}
-body{display:flex;align-items:center;justify-content:center;min-height:100vh;min-height:100dvh;background:radial-gradient(ellipse at center,#1a1a2e 0%,#0d0d0d 100%)}
+:root{
+  --gray:#c0c0c0;--white:#ffffff;--black:#000000;--dark:#0a0a0a;
+  --shadow:#808080;--mid:#dfdfdf;--blue:#000080;--blue2:#1084d0;
+  --teal:#008080;--green:#008000;--red:#800000;--yellow:#ffff00;
+  --lt-green:#c8f0c8;--lt-red:#f0c8c8;--lt-yellow:#ffffc8;
+  --font-main:'VT323',monospace;--font-mono:'Share Tech Mono',monospace;
+}
 
-.phone-shell{width:100%;height:100vh;height:100dvh;position:relative;display:flex;flex-direction:column;background:transparent;border-radius:0;padding:0}
-@media(min-width:500px)and(min-height:700px){.phone-shell{width:min(390px,90vw);height:min(844px,95vh);height:min(844px,95dvh);background:#1a1a1a;border-radius:50px;padding:14px;box-shadow:0 0 0 2px #333,0 0 0 4px #222,0 40px 80px rgba(0,0,0,.8),inset 0 0 0 1px #444}}
+html,body{width:100%;height:100%;overflow:hidden;}
 
-.phone-notch{width:130px;height:30px;background:#1a1a1a;border-radius:0 0 18px 18px;position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:10;display:none;align-items:center;justify-content:center;gap:6px}
-@media(min-width:500px)and(min-height:700px){.phone-notch{display:flex}}
-.notch-cam{width:10px;height:10px;background:#2a2a2a;border-radius:50%;border:1px solid #333}
-.notch-speaker{width:60px;height:5px;background:#2a2a2a;border-radius:3px}
+body{
+  display:flex;align-items:center;justify-content:center;
+  min-height:100vh;min-height:100dvh;
+  background:radial-gradient(ellipse at center,#1a1a2e 0%,#0d0d0d 100%);
+}
 
-.phone-screen{flex:1;background:var(--teal);border-radius:0;overflow:hidden;position:relative;display:flex;flex-direction:column;min-height:0}
-@media(min-width:500px)and(min-height:700px){.phone-screen{border-radius:36px}}
-.phone-screen::before{content:'';position:absolute;inset:0;pointer-events:none;z-index:0;background-image:url("data:image/svg+xml,%3Csvg width='4' height='4' xmlns='http://www.w3.org/2000/svg'%3E%3Crect x='0' y='0' width='2' height='2' fill='%23008080'/%3E%3Crect x='2' y='2' width='2' height='2' fill='%23008080'/%3E%3Crect x='0' y='2' width='2' height='2' fill='%23007070'/%3E%3Crect x='2' y='0' width='2' height='2' fill='%23007070'/%3E%3C/svg%3E")}
+/* ── OUTER WRAPPER — controls desktop centering ── */
+.app-wrapper {
+  width:100%;
+  height:100vh;
+  height:100dvh;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
 
-.screen{position:absolute;inset:0;display:none;flex-direction:column;z-index:1;overflow-y:auto;overflow-x:hidden;padding-bottom:calc(52px + env(safe-area-inset-bottom,0px));padding-top:env(safe-area-inset-top,0px)}
-.screen.active{display:flex}
-@media(min-width:500px)and(min-height:700px){.screen{padding-top:0}}
-.screen::-webkit-scrollbar{width:6px}
-.screen::-webkit-scrollbar-track{background:var(--gray)}
-.screen::-webkit-scrollbar-thumb{background:var(--shadow);border-top:1px solid var(--white);border-left:1px solid var(--white)}
+/* ── PHONE SHELL ── */
+/* Mobile: fill the screen */
+.phone-shell {
+  width:100%;
+  height:100vh;
+  height:100dvh;
+  position:relative;
+  display:flex;
+  flex-direction:column;
+  background:transparent;
+  border-radius:0;
+  padding:0;
+}
 
-.win{background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);margin:8px;flex-shrink:0;max-width:100%;overflow-wrap:break-word;word-break:break-word}
-.win-title{background:linear-gradient(90deg,var(--blue) 0%,var(--blue2) 100%);color:white;font-family:var(--font-main);font-size:clamp(14px,4.5vw,18px);padding:2px 6px;display:flex;align-items:center;gap:5px;user-select:none;min-height:24px;overflow:hidden}
-.win-btns{margin-left:auto;display:flex;gap:2px}
-.wbtn{background:var(--gray);border-top:1px solid var(--white);border-left:1px solid var(--white);border-right:1px solid var(--dark);border-bottom:1px solid var(--dark);width:14px;height:12px;font-size:8px;font-family:var(--font-main);cursor:pointer;display:flex;align-items:center;justify-content:center;color:#000;line-height:1}
-.win-body{padding:10px}
+/* Desktop (≥900px wide): centered 1/3-width column with phone frame */
+@media (min-width:900px) {
+  .phone-shell {
+    width:380px;
+    height:min(820px,95vh);
+    height:min(820px,95dvh);
+    background:#1a1a1a;
+    border-radius:50px;
+    padding:14px;
+    box-shadow:0 0 0 2px #333,0 0 0 4px #222,0 40px 80px rgba(0,0,0,.9),inset 0 0 0 1px #444;
+  }
+}
 
-.inset{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:8px;margin-bottom:8px;font-family:var(--font-mono);font-size:12px;line-height:1.7;overflow-wrap:break-word;word-break:break-word}
+/* Tablet (500–899px): small phone shell */
+@media (min-width:500px) and (max-width:899px) and (min-height:600px) {
+  .phone-shell {
+    width:min(390px,90vw);
+    height:min(820px,95vh);
+    height:min(820px,95dvh);
+    background:#1a1a1a;
+    border-radius:50px;
+    padding:14px;
+    box-shadow:0 0 0 2px #333,0 0 0 4px #222,0 30px 60px rgba(0,0,0,.8),inset 0 0 0 1px #444;
+  }
+}
 
-.btn{font-family:var(--font-main);font-size:20px;padding:3px 12px;background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);cursor:pointer;color:#000;letter-spacing:.5px;display:inline-flex;align-items:center;gap:5px}
-.btn:active{border-top:2px solid var(--dark);border-left:2px solid var(--dark);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding-top:5px;padding-left:14px}
-.btn:disabled{opacity:.5;cursor:not-allowed}
-.btn.full{width:100%;justify-content:center;margin-bottom:6px}
-.btn.big{font-size:clamp(18px,6vw,24px);padding:6px 14px}
-.btn.green-sel{background:var(--lt-green)}
-.btn.red-sel{background:var(--lt-red)}
+.phone-notch{width:130px;height:30px;background:#1a1a1a;border-radius:0 0 18px 18px;position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:10;display:none;align-items:center;justify-content:center;gap:6px;}
+@media(min-width:500px){.phone-notch{display:flex;}}
+.notch-cam{width:10px;height:10px;background:#2a2a2a;border-radius:50%;border:1px solid #333;}
+.notch-speaker{width:60px;height:5px;background:#2a2a2a;border-radius:3px;}
 
-.field-row{display:flex;flex-direction:column;gap:2px;margin-bottom:8px}
-.field-row label{font-family:var(--font-main);font-size:18px;letter-spacing:.5px}
-.field-row input,.field-row textarea,.field-row select{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:3px 6px;font-family:var(--font-mono);font-size:12px;outline:none;width:100%;resize:none}
-.field-row input:focus,.field-row textarea:focus{outline:1px dotted var(--blue);outline-offset:-1px}
+.phone-screen{flex:1;background:var(--teal);border-radius:0;overflow:hidden;position:relative;display:flex;flex-direction:column;min-height:0;}
+@media(min-width:500px){.phone-screen{border-radius:36px;}}
 
-.divider{height:2px;background:var(--shadow);border-bottom:1px solid var(--white);margin:8px 0}
+.phone-screen::before{content:'';position:absolute;inset:0;pointer-events:none;z-index:0;background-image:url("data:image/svg+xml,%3Csvg width='4' height='4' xmlns='http://www.w3.org/2000/svg'%3E%3Crect x='0' y='0' width='2' height='2' fill='%23008080'/%3E%3Crect x='2' y='2' width='2' height='2' fill='%23008080'/%3E%3Crect x='0' y='2' width='2' height='2' fill='%23007070'/%3E%3Crect x='2' y='0' width='2' height='2' fill='%23007070'/%3E%3C/svg%3E");}
 
-.status-bar{background:var(--gray);border-top:1px solid var(--shadow);padding:2px 6px;font-family:var(--font-main);font-size:15px;display:flex;gap:4px}
-.status-panel{border-top:1px solid var(--shadow);border-left:1px solid var(--shadow);border-right:1px solid var(--white);border-bottom:1px solid var(--white);padding:1px 6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* ── SCREENS ── */
+.screen{position:absolute;inset:0;display:none;flex-direction:column;z-index:1;overflow-y:auto;overflow-x:hidden;padding-bottom:calc(52px + env(safe-area-inset-bottom,0px));padding-top:env(safe-area-inset-top,0px);}
+.screen.active{display:flex;}
+@media(min-width:500px){.screen{padding-top:0;}}
+.screen::-webkit-scrollbar{width:6px;}
+.screen::-webkit-scrollbar-track{background:var(--gray);}
+.screen::-webkit-scrollbar-thumb{background:var(--shadow);border-top:1px solid var(--white);border-left:1px solid var(--white);}
 
-.taskbar{position:absolute;bottom:0;left:0;right:0;background:var(--gray);border-top:2px solid var(--white);display:flex;align-items:center;padding:0 6px;padding-bottom:env(safe-area-inset-bottom,0px);gap:4px;z-index:50;min-height:52px}
-.tab-btn{font-family:var(--font-main);font-size:13px;letter-spacing:.3px;padding:2px 4px;background:var(--gray);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);flex:1;cursor:pointer;text-align:center;color:#000;line-height:1.2;height:36px;display:flex;flex-direction:column;align-items:center;justify-content:center}
-.tab-btn.active{border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--shadow);border-bottom:2px solid var(--shadow)}
-.tab-btn .tab-icon{font-size:16px}
-.tab-btn .tab-label{font-size:10px}
-.taskbar-clock{font-family:var(--font-mono);font-size:10px;border-top:1px solid var(--shadow);border-left:1px solid var(--shadow);border-right:1px solid var(--white);border-bottom:1px solid var(--white);padding:2px 5px;text-align:center;line-height:1.4;white-space:nowrap}
+/* ── WIN98 ── */
+.win{background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);margin:8px;flex-shrink:0;max-width:100%;overflow-wrap:break-word;word-break:break-word;}
+.win-title{background:linear-gradient(90deg,var(--blue) 0%,var(--blue2) 100%);color:white;font-family:var(--font-main);font-size:clamp(14px,4.5vw,18px);padding:2px 6px;display:flex;align-items:center;gap:5px;user-select:none;min-height:24px;overflow:hidden;}
+@media(min-width:500px){.win-title{font-size:18px;}}
+.win-btns{margin-left:auto;display:flex;gap:2px;}
+.wbtn{background:var(--gray);border-top:1px solid var(--white);border-left:1px solid var(--white);border-right:1px solid var(--dark);border-bottom:1px solid var(--dark);width:14px;height:12px;font-size:8px;font-family:var(--font-main);cursor:pointer;display:flex;align-items:center;justify-content:center;color:#000;line-height:1;}
+.win-body{padding:10px;}
 
-.popup-overlay{display:none;position:absolute;inset:0;background:rgba(0,0,0,.35);z-index:200;align-items:center;justify-content:center;padding:16px}
-.popup-overlay.show{display:flex}
-.popup-win{background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);width:100%;max-width:300px;max-height:90vh;overflow-y:auto}
-.popup-body{padding:14px 12px 10px;text-align:center}
-.popup-icon{font-size:36px;display:block;margin-bottom:6px}
-.popup-msg{font-family:var(--font-main);font-size:20px;line-height:1.3;margin-bottom:12px}
-.popup-code{font-family:var(--font-mono);font-size:22px;letter-spacing:4px;background:var(--lt-yellow);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:6px 10px;display:inline-block;margin-bottom:10px}
-.popup-btns{display:flex;gap:6px;justify-content:center;flex-wrap:wrap}
-.popup-loading{font-family:var(--font-mono);font-size:11px;color:#555;padding:8px 0}
-.loading-dots::after{content:'...';animation:ldots 1.2s steps(4,end) infinite}
-@keyframes ldots{0%{content:'.'}33%{content:'..'}66%{content:'...'}100%{content:''}}
+.inset{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:8px;margin-bottom:8px;font-family:var(--font-mono);font-size:12px;line-height:1.7;overflow-wrap:break-word;word-break:break-word;}
 
-#screen-boot{background:#000;align-items:center;justify-content:center;padding-bottom:0 !important;padding-top:0 !important}
-.boot-logo{font-family:var(--font-main);font-size:clamp(36px,12vw,48px);color:var(--gray);letter-spacing:3px;text-align:center;line-height:1;margin-bottom:6px}
-.boot-sub{font-family:var(--font-mono);font-size:11px;color:#666;letter-spacing:2px;margin-bottom:30px}
-.boot-bar-wrap{width:200px;height:20px;background:#000;border:2px solid #555;margin-bottom:10px;overflow:hidden}
-.boot-bar-fill{height:100%;background:var(--blue2);width:0%;transition:width .3s}
-.boot-status{font-family:var(--font-mono);font-size:11px;color:#555}
+/* ── BUTTONS ── */
+.btn{font-family:var(--font-main);font-size:20px;padding:3px 12px;background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);cursor:pointer;color:#000;letter-spacing:.5px;display:inline-flex;align-items:center;gap:5px;}
+.btn:active{border-top:2px solid var(--dark);border-left:2px solid var(--dark);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding-top:5px;padding-left:14px;}
+.btn:disabled{opacity:.5;cursor:not-allowed;}
+.btn.full{width:100%;justify-content:center;margin-bottom:6px;}
+.btn.big{font-size:clamp(18px,6vw,24px);padding:6px 14px;}
+@media(min-width:500px){.btn.big{font-size:22px;}}
+.btn.green-sel{background:var(--lt-green);}
+.btn.red-sel{background:var(--lt-red);}
+.btn.danger{background:var(--lt-red);color:var(--red);}
 
-#screen-welcome{justify-content:flex-start;padding:0}
-.welcome-inner{padding:16px 8px 8px}
-@media(min-width:500px)and(min-height:700px){#screen-welcome{justify-content:center}.welcome-inner{padding:60px 8px 8px}}
-.app-logo-big{font-family:var(--font-main);font-size:clamp(32px,10vw,46px);color:var(--blue);text-align:center;letter-spacing:2px;line-height:1;text-shadow:2px 2px 0 rgba(0,0,128,.25)}
-.app-tagline{font-family:var(--font-mono);font-size:11px;text-align:center;color:#444;margin-bottom:14px;letter-spacing:1px}
+/* ── INPUTS ── */
+.field-row{display:flex;flex-direction:column;gap:2px;margin-bottom:8px;}
+.field-row label{font-family:var(--font-main);font-size:18px;letter-spacing:.5px;}
+.field-row input,.field-row textarea,.field-row select{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:3px 6px;font-family:var(--font-mono);font-size:12px;outline:none;width:100%;resize:none;}
+.field-row input:focus,.field-row textarea:focus{outline:1px dotted var(--blue);outline-offset:-1px;}
 
-.eco-badge{background:var(--lt-green);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:4px 8px;font-family:var(--font-main);font-size:clamp(13px,4vw,17px);margin-bottom:8px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;word-break:break-all}
+.divider{height:2px;background:var(--shadow);border-bottom:1px solid var(--white);margin:8px 0;}
 
-.member-item{display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid var(--mid);font-family:var(--font-mono);font-size:12px}
-.member-dot{width:8px;height:8px;background:var(--green);border-radius:50%;flex-shrink:0}
+.status-bar{background:var(--gray);border-top:1px solid var(--shadow);padding:2px 6px;font-family:var(--font-main);font-size:15px;display:flex;gap:4px;}
+.status-panel{border-top:1px solid var(--shadow);border-left:1px solid var(--shadow);border-right:1px solid var(--white);border-bottom:1px solid var(--white);padding:1px 6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 
-.invite-card{background:var(--lt-yellow);border:2px dashed var(--shadow);padding:10px;margin-bottom:8px;font-family:var(--font-mono);font-size:12px;position:relative;overflow-wrap:break-word;word-break:break-word}
-.invite-card-title{font-family:var(--font-main);font-size:clamp(18px,6vw,26px);color:var(--blue);margin-bottom:4px;letter-spacing:1px;padding-right:60px}
-.invite-card-stamp{position:absolute;top:8px;right:8px;font-family:var(--font-main);font-size:clamp(14px,4.5vw,24px);color:var(--red);border:3px solid var(--red);padding:0 4px;transform:rotate(12deg);opacity:.8;line-height:1;white-space:nowrap}
-.invite-card-stamp.yes{color:var(--green);border-color:var(--green);transform:rotate(-8deg)}
-.invite-card-stamp.pending{color:#888;border-color:#888}
+/* ── TASKBAR ── */
+.taskbar{position:absolute;bottom:0;left:0;right:0;background:var(--gray);border-top:2px solid var(--white);display:flex;align-items:center;padding:0 4px;padding-bottom:env(safe-area-inset-bottom,0px);gap:3px;z-index:50;min-height:52px;}
+.tab-btn{font-family:var(--font-main);font-size:12px;padding:2px 3px;background:var(--gray);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);flex:1;cursor:pointer;text-align:center;color:#000;line-height:1.1;height:38px;display:flex;flex-direction:column;align-items:center;justify-content:center;}
+.tab-btn.active{border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--shadow);border-bottom:2px solid var(--shadow);}
+.tab-btn .tab-icon{font-size:15px;}
+.tab-btn .tab-label{font-size:9px;}
+.taskbar-clock{font-family:var(--font-mono);font-size:9px;border-top:1px solid var(--shadow);border-left:1px solid var(--shadow);border-right:1px solid var(--white);border-bottom:1px solid var(--white);padding:2px 4px;text-align:center;line-height:1.4;white-space:nowrap;}
 
-.countdown-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px}
-.cd-block{background:var(--blue);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);padding:8px 4px;text-align:center}
-.cd-num{font-family:var(--font-main);font-size:clamp(32px,10vw,48px);color:var(--yellow);line-height:1;display:block}
-.cd-label{font-family:var(--font-mono);font-size:10px;color:#aaa;letter-spacing:2px}
+/* ── POPUP ── */
+.popup-overlay{display:none;position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:200;align-items:center;justify-content:center;padding:16px;}
+.popup-overlay.show{display:flex;}
+.popup-win{background:var(--gray);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);width:100%;max-width:300px;max-height:90vh;overflow-y:auto;}
+.popup-body{padding:14px 12px 10px;text-align:center;}
+.popup-icon{font-size:36px;display:block;margin-bottom:6px;}
+.popup-msg{font-family:var(--font-main);font-size:20px;line-height:1.3;margin-bottom:12px;}
+.popup-code{font-family:var(--font-mono);font-size:22px;letter-spacing:4px;background:var(--lt-yellow);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:6px 10px;display:inline-block;margin-bottom:10px;}
+.popup-btns{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;}
+.popup-loading{font-family:var(--font-mono);font-size:11px;color:#555;padding:8px 0;}
+.loading-dots::after{content:'...';animation:ldots 1.2s steps(4,end) infinite;}
+@keyframes ldots{0%{content:'.'}33%{content:'..'}66%{content:'...'}100%{content:'';}}
 
-.mini-cal{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:6px;margin-bottom:8px}
-.cal-header{font-family:var(--font-main);font-size:20px;text-align:center;margin-bottom:6px;color:var(--blue)}
-.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:1px;text-align:center;font-family:var(--font-mono);font-size:10px}
-.cal-day-head{color:var(--blue);font-weight:bold;padding:2px 0}
-.cal-day{padding:3px 2px}
-.cal-day.today{background:var(--blue);color:var(--white)}
-.cal-day.event-day{background:var(--yellow);color:var(--black);font-weight:bold;border:1px solid var(--shadow)}
-.cal-day.other-month{color:#999}
+/* ── BOOT ── */
+#screen-boot{background:#000;align-items:center;justify-content:center;padding-bottom:0 !important;padding-top:0 !important;}
+.boot-logo{font-family:var(--font-main);font-size:clamp(36px,12vw,48px);color:var(--gray);letter-spacing:3px;text-align:center;line-height:1;margin-bottom:6px;}
+.boot-sub{font-family:var(--font-mono);font-size:11px;color:#666;letter-spacing:2px;margin-bottom:30px;}
+.boot-bar-wrap{width:200px;height:20px;background:#000;border:2px solid #555;margin-bottom:10px;overflow:hidden;}
+.boot-bar-fill{height:100%;background:var(--blue2);width:0%;transition:width .3s;}
+.boot-status{font-family:var(--font-mono);font-size:11px;color:#555;}
 
-.contact-item{display:flex;align-items:center;gap:6px;padding:4px 6px;border-bottom:1px solid var(--mid);font-family:var(--font-mono);font-size:12px;cursor:pointer}
-.contact-item:hover,.contact-item.selected-contact{background:var(--blue);color:var(--white)}
-.contact-item:hover .member-dot,.contact-item.selected-contact .member-dot{background:var(--yellow)}
+/* ── WELCOME ── */
+#screen-welcome{justify-content:flex-start;padding:0;}
+.welcome-inner{padding:16px 8px 8px;}
+@media(min-width:500px){#screen-welcome{justify-content:center;}.welcome-inner{padding:40px 8px 8px;}}
+.app-logo-big{font-family:var(--font-main);font-size:clamp(32px,10vw,46px);color:var(--blue);text-align:center;letter-spacing:2px;line-height:1;text-shadow:2px 2px 0 rgba(0,0,128,.25);}
+@media(min-width:500px){.app-logo-big{font-size:44px;}}
+.app-tagline{font-family:var(--font-mono);font-size:11px;text-align:center;color:#444;margin-bottom:14px;letter-spacing:1px;}
 
-.step-dots{display:flex;gap:6px;justify-content:center;margin-bottom:8px}
-.step-dot{width:8px;height:8px;background:var(--shadow);border-radius:50%}
-.step-dot.done{background:var(--blue2)}
-.step-dot.current{background:var(--blue);border:2px solid var(--dark)}
+/* ── ECO BADGE ── */
+.eco-badge{background:var(--lt-green);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:4px 8px;font-family:var(--font-main);font-size:clamp(13px,4vw,17px);margin-bottom:8px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;word-break:break-all;}
+@media(min-width:500px){.eco-badge{font-size:16px;}}
 
-.ticker{background:var(--blue);color:var(--yellow);font-family:var(--font-main);font-size:14px;padding:2px 0;overflow:hidden;white-space:nowrap;flex-shrink:0}
-.ticker-inner{display:inline-block;animation:scroll-left 18s linear infinite;padding-left:100%}
+/* ── MEMBERS ── */
+.member-item{display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid var(--mid);font-family:var(--font-mono);font-size:12px;}
+.member-dot{width:8px;height:8px;background:var(--green);border-radius:50%;flex-shrink:0;}
+
+/* ── INVITE CARD ── */
+.invite-card{background:var(--lt-yellow);border:2px dashed var(--shadow);padding:10px;margin-bottom:8px;font-family:var(--font-mono);font-size:12px;position:relative;overflow-wrap:break-word;word-break:break-word;}
+.invite-card-title{font-family:var(--font-main);font-size:clamp(18px,6vw,26px);color:var(--blue);margin-bottom:4px;letter-spacing:1px;padding-right:60px;}
+@media(min-width:500px){.invite-card-title{font-size:24px;}}
+.invite-card-stamp{position:absolute;top:8px;right:8px;font-family:var(--font-main);font-size:clamp(14px,4.5vw,24px);color:var(--red);border:3px solid var(--red);padding:0 4px;transform:rotate(12deg);opacity:.8;line-height:1;white-space:nowrap;}
+.invite-card-stamp.yes{color:var(--green);border-color:var(--green);transform:rotate(-8deg);}
+.invite-card-stamp.pending{color:#888;border-color:#888;}
+
+/* ── COUNTDOWN ── */
+.countdown-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;}
+.cd-block{background:var(--blue);border-top:2px solid var(--white);border-left:2px solid var(--white);border-right:2px solid var(--dark);border-bottom:2px solid var(--dark);padding:8px 4px;text-align:center;}
+.cd-num{font-family:var(--font-main);font-size:clamp(32px,10vw,48px);color:var(--yellow);line-height:1;display:block;}
+@media(min-width:500px){.cd-num{font-size:44px;}}
+.cd-label{font-family:var(--font-mono);font-size:10px;color:#aaa;letter-spacing:2px;}
+
+/* ── MINI CALENDAR ── */
+.mini-cal{background:var(--white);border-top:2px solid var(--shadow);border-left:2px solid var(--shadow);border-right:2px solid var(--white);border-bottom:2px solid var(--white);padding:6px;margin-bottom:8px;}
+.cal-header{font-family:var(--font-main);font-size:20px;text-align:center;margin-bottom:6px;color:var(--blue);}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:1px;text-align:center;font-family:var(--font-mono);font-size:10px;}
+.cal-day-head{color:var(--blue);font-weight:bold;padding:2px 0;}
+.cal-day{padding:3px 2px;}
+.cal-day.today{background:var(--blue);color:var(--white);}
+.cal-day.event-day{background:var(--yellow);color:var(--black);font-weight:bold;border:1px solid var(--shadow);}
+.cal-day.other-month{color:#999;}
+
+/* ── CONTACTS ── */
+.contact-item{display:flex;align-items:center;gap:6px;padding:4px 6px;border-bottom:1px solid var(--mid);font-family:var(--font-mono);font-size:12px;cursor:pointer;}
+.contact-item:hover,.contact-item.selected-contact{background:var(--blue);color:var(--white);}
+.contact-item:hover .member-dot,.contact-item.selected-contact .member-dot{background:var(--yellow);}
+
+/* ── STEP DOTS ── */
+.step-dots{display:flex;gap:6px;justify-content:center;margin-bottom:8px;}
+.step-dot{width:8px;height:8px;background:var(--shadow);border-radius:50%;}
+.step-dot.done{background:var(--blue2);}
+.step-dot.current{background:var(--blue);border:2px solid var(--dark);}
+
+/* ── TICKER ── */
+.ticker{background:var(--blue);color:var(--yellow);font-family:var(--font-main);font-size:14px;padding:2px 0;overflow:hidden;white-space:nowrap;flex-shrink:0;}
+.ticker-inner{display:inline-block;animation:scroll-left 18s linear infinite;padding-left:100%;}
 @keyframes scroll-left{from{transform:translateX(0)}to{transform:translateX(-100%)}}
 
+/* ── ECO SWITCHER BAR ── */
+.eco-switcher{background:var(--blue);padding:3px 8px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;z-index:2;}
+.eco-switcher-name{font-family:var(--font-main);font-size:14px;color:var(--yellow);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.eco-switcher-btn{font-family:var(--font-main);font-size:12px;color:var(--yellow);background:transparent;border:1px solid rgba(255,255,255,.3);padding:1px 6px;cursor:pointer;white-space:nowrap;}
+.eco-switcher-btn:hover{background:rgba(255,255,255,.15);}
+
+/* ── ERROR HINT ── */
+.rsvp-error-hint{background:var(--lt-red);border:1px solid var(--red);padding:6px 8px;font-family:var(--font-mono);font-size:10px;color:var(--red);margin-bottom:8px;line-height:1.5;}
+
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
-.blink{animation:blink 1s step-end infinite}
-img,video{max-width:100%}
+.blink{animation:blink 1s step-end infinite;}
+img,video{max-width:100%;}
 </style>
 </head>
 <body>
 
+<!-- ════════════════════════════════════════════
+     FIRESTORE SECURITY RULES
+     ════════════════════════════════════════════
+     HOW TO APPLY:
+       1. Go to https://console.firebase.google.com
+       2. Select your project → Firestore Database → Rules tab
+       3. Delete everything already there
+       4. Paste the rules below and click "Publish"
+     ════════════════════════════════════════════
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── USERS ─────────────────────────────────────────────────────────────
+    // Each user document is stored under their Firebase anonymous uid.
+    // Users can only read and write their own document — no one else can
+    // view or modify another user's display name, active ecosystem, or
+    // full list of ecosystems they belong to.
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // ── ECOSYSTEMS ────────────────────────────────────────────────────────
+    // Any signed-in user can read any ecosystem document. This is required
+    // so that a user can look up an ecosystem by its 6-character code when
+    // joining or connecting to a friend's group.
+    // Any signed-in user can create a new ecosystem document.
+    // Editing or deleting the ecosystem document itself is not permitted —
+    // membership is managed through the members subcollection below.
+    match /ecosystems/{ecoCode} {
+      allow read:   if request.auth != null;
+      allow create: if request.auth != null;
+
+      // ── MEMBERS subcollection ──────────────────────────────────────────
+      // Any signed-in user can read the full members list for any ecosystem.
+      // This is needed to display the member roster on the home screen and
+      // populate the recipient picker when composing an invite.
+      // A user may only write (add, update, or delete) their OWN member
+      // entry — identified by their uid matching the document id. This
+      // covers both joining an ecosystem and leaving it.
+      match /members/{memberId} {
+        allow read:  if request.auth != null;
+        allow write: if request.auth != null && request.auth.uid == memberId;
+      }
+    }
+
+    // ── INVITES ───────────────────────────────────────────────────────────
+    // Invite documents are private. Only the sender and the intended
+    // recipient are permitted to read a given invite.
+    match /invites/{inviteId} {
+
+      // CREATE: only a signed-in user can create an invite, and the
+      // fromUid field in the new document must equal their own uid.
+      // This prevents anyone from spoofing a different sender identity.
+      allow create: if request.auth != null
+                    && request.auth.uid == request.resource.data.fromUid;
+
+      // READ: only the sender (fromUid) or the recipient (toUid) may
+      // read the invite document. All other users are denied access.
+      allow read: if request.auth != null
+                  && (request.auth.uid == resource.data.fromUid
+                   || request.auth.uid == resource.data.toUid);
+
+      // UPDATE: only the recipient (toUid) may update an invite, and
+      // they are strictly limited to changing the 'rsvp' field alone.
+      // The diff().affectedKeys().hasOnly(['rsvp']) check is what makes
+      // the YES / NO buttons work — and also ensures the recipient cannot
+      // tamper with any other field such as the title, date, or location.
+      allow update: if request.auth != null
+                    && request.auth.uid == resource.data.toUid
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rsvp']);
+    }
+
+  }
+}
+═══════════════════════════════════════════════ -->
+
+<div class="app-wrapper">
 <div class="phone-shell">
   <div class="phone-notch">
     <div class="notch-cam"></div>
@@ -933,14 +1046,14 @@ img,video{max-width:100%}
     <!-- BOOT -->
     <div class="screen active" id="screen-boot">
       <div class="boot-logo">ECO<br>INVITE</div>
-      <div class="boot-sub">v2.0 · RETRO RSVP SYSTEM</div>
+      <div class="boot-sub">v2.1 · RETRO RSVP SYSTEM</div>
       <div class="boot-bar-wrap"><div class="boot-bar-fill" id="boot-fill"></div></div>
       <div class="boot-status" id="boot-status">Loading...</div>
     </div>
 
     <!-- WELCOME -->
     <div class="screen" id="screen-welcome">
-      <div class="ticker"><span class="ticker-inner">★ WELCOME TO ECOINVITE ★ THE RETRO RSVP SYSTEM ★ SHARE YOUR CODE ★ BUILD YOUR ECOSYSTEM ★ SEND INVITES THE OLD WAY ★&nbsp;</span></div>
+      <div class="ticker"><span class="ticker-inner">★ WELCOME TO ECOINVITE ★ THE RETRO RSVP SYSTEM ★ SHARE YOUR CODE ★ BUILD YOUR ECOSYSTEM ★&nbsp;</span></div>
       <div class="welcome-inner">
         <div class="win">
           <div class="win-title"><span>📬</span> EcoInvite — Welcome<div class="win-btns"><div class="wbtn">_</div><div class="wbtn">□</div><div class="wbtn">✕</div></div></div>
@@ -959,25 +1072,35 @@ img,video{max-width:100%}
 
     <!-- HOME -->
     <div class="screen" id="screen-home">
-      <div class="ticker"><span class="ticker-inner" id="home-ticker">★ YOUR ECOSYSTEM IS ACTIVE ★ SEND INVITES TO YOUR CIRCLE ★&nbsp;</span></div>
-      <div class="win" style="margin-top:8px;">
+      <!-- Ecosystem switcher bar -->
+      <div class="eco-switcher">
+        <span class="eco-switcher-name">🌐 <span id="eco-switcher-label">My Eco</span></span>
+        <button class="eco-switcher-btn" onclick="showSwitchEco()">⇄ SWITCH</button>
+        <button class="eco-switcher-btn" onclick="showLeaveEco()" style="margin-left:4px;color:#ffaaaa;">✕ LEAVE</button>
+      </div>
+
+      <div class="ticker"><span class="ticker-inner" id="home-ticker">★ YOUR ECOSYSTEM IS ACTIVE ★&nbsp;</span></div>
+
+      <div class="win" style="margin-top:6px;">
         <div class="win-title"><span>🌐</span> <span id="eco-name-display">My Eco</span> — Dashboard<div class="win-btns"><div class="wbtn">_</div><div class="wbtn">□</div><div class="wbtn">✕</div></div></div>
         <div class="win-body">
-          <div class="eco-badge">🟢 <span id="home-eco-code-display">ECO: ------</span> &nbsp;·&nbsp; <span id="home-member-count">1 member</span></div>
+          <div class="eco-badge">🟢 <span id="home-eco-code-display">ECO: ------</span> &nbsp;·&nbsp; <span id="home-member-count">1 member</span> &nbsp;·&nbsp; <span id="eco-count-badge" style="color:#555;">1 ecosystem</span></div>
           <div style="font-family:var(--font-main);font-size:16px;color:#444;margin-bottom:4px;">► MEMBERS:</div>
-          <div class="inset" id="member-list-home" style="max-height:80px;overflow-y:auto;"><span style="color:#888;font-family:var(--font-mono);font-size:11px;">Loading members...</span></div>
+          <div class="inset" id="member-list-home" style="max-height:80px;overflow-y:auto;"><span style="color:#888;font-family:var(--font-mono);font-size:11px;">Loading...</span></div>
           <button class="btn full" onclick="showInviteCode()">📋 Share Ecosystem Code</button>
           <button class="btn full" onclick="showAddMember()">➕ Add Member by Code</button>
         </div>
       </div>
+
       <div class="win">
         <div class="win-title"><span>✉️</span> New Invite</div>
         <div class="win-body"><button class="btn full big" onclick="goToSendInvite()">✉️ SEND AN INVITE</button></div>
       </div>
+
       <div class="win">
-        <div class="win-title"><span>📥</span> Incoming Invites <span class="blink" style="font-size:12px;">●</span></div>
+        <div class="win-title"><span>📥</span> Pending Invites <span class="blink" style="font-size:12px;color:var(--red);">●</span></div>
         <div class="win-body">
-          <div id="incoming-invites-list"><div style="font-family:var(--font-mono);font-size:12px;color:#888;text-align:center;padding:8px;">No incoming invites yet.</div></div>
+          <div id="incoming-invites-list"><div style="font-family:var(--font-mono);font-size:12px;color:#888;text-align:center;padding:8px;">No pending invites.</div></div>
         </div>
       </div>
     </div>
@@ -1028,6 +1151,13 @@ img,video{max-width:100%}
         <div class="win-title"><span>📥</span> Incoming Invite<div class="win-btns"><div class="wbtn" onclick="showMainTab('screen-home','tab-home')">✕</div></div></div>
         <div class="win-body">
           <div class="invite-card"><div class="invite-card-stamp pending" id="receive-stamp">PENDING</div><div class="invite-card-title" id="rec-title">—</div><div id="rec-details" style="line-height:1.8;"></div></div>
+
+          <!-- RSVP error hint — shown if Firestore rules block the update -->
+          <div class="rsvp-error-hint" id="rsvp-error-hint" style="display:none;">
+            ⚠ RSVP failed — Firestore rules may need updating.<br>
+            Go to Firebase Console → Firestore → Rules and paste the rules from the README.
+          </div>
+
           <div style="font-family:var(--font-main);font-size:18px;margin-bottom:6px;">► YOUR RSVP:</div>
           <div style="display:flex;gap:8px;margin-bottom:8px;">
             <button class="btn big" id="rsvp-yes-btn" onclick="doRsvp('yes')" style="flex:1;justify-content:center;">✔ YES</button>
@@ -1099,7 +1229,9 @@ img,video{max-width:100%}
       </div>
     </div>
 
-  </div>
-</div>
+  </div><!-- phone-screen -->
+</div><!-- phone-shell -->
+</div><!-- app-wrapper -->
+
 </body>
 </html>
